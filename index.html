@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sistema Malut - Gestão Inteligente (Firebase No-Auth)</title>
+
+    <!-- TAILWIND CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- FONT AWESOME -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- GOOGLE FONTS -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #e2e8f0; }
+        ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+        .fade-in { animation: fadeIn 0.4s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* BLOCO 1 - FILTRO MICRO */
+        .status-microfilter {
+            font-size: 11px !important;
+            padding: 1px 3px !important;
+            margin-left: 5px !important;
+            height: 20px !important;
+            line-height: 18px !important;
+            border: 1px solid #ccc !important;
+            border-radius: 3px !important;
+            background: white;
+            cursor: pointer;
+        }
+
+        /* BLOCO 2 - BADGE 3 BOLAS COM TOOLTIP */
+        .stuck-badge {
+            position: fixed !important;
+            top: 12px !important; right: 12px !important;
+            display: flex !important; gap: 3px !important;
+            z-index: 9999 !important;
+            padding: 3px 6px !important;
+            background: rgba(0,0,0,0.9) !important;
+            border-radius: 12px !important;
+            cursor: pointer;
+        }
+        .stuck-badge::after {
+            content: "Processos travados >3 dias";
+            position: absolute; top: 100%; right: 0;
+            background: #333; color: white; padding: 4px 8px;
+            border-radius: 4px; font-size: 10px; white-space: nowrap;
+            opacity: 0; transition: opacity 0.3s; margin-top: 4px;
+            pointer-events: none;
+        }
+        .stuck-badge:hover::after { opacity: 1; }
+
+        .stuck-dot {
+            width: 16px !important; height: 16px !important;
+            border-radius: 50% !important;
+            display: flex !important; align-items: center !important;
+            justify-content: center !important;
+            font-size: 9px !important; font-weight: bold !important;
+            color: white !important;
+            transition: transform 0.2s;
+        }
+        .stuck-dot:hover { transform: scale(1.1); }
+        .stuck-dot.yellow { background: #f39c12 !important; }
+        .stuck-dot.orange { background: #e67e22 !important; }
+        .stuck-dot.blue { background: #2980b9 !important; }
+    </style>
+
+    <!-- Firebase + Firestore (MalutDB) - SEM AUTH -->
+    <script type="module">
+        import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+        import {
+            getFirestore,
+            collection,
+            addDoc,
+            getDocs,
+            doc,
+            updateDoc,
+            deleteDoc,
+            serverTimestamp,
+            query,
+            orderBy,
+            onSnapshot,
+            limit
+        } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDD4jcGT53I6ywxjT3aeuWkuTfW-eCZ-Q",
+            authDomain: "gestao-de-compras-malut.firebaseapp.com",
+            projectId: "gestao-de-compras-malut",
+            storageBucket: "gestao-de-compras-malut.firebasestorage.app",
+            messagingSenderId: "245993732396",
+            appId: "1:245993732396:web:6dbb1636c3dad4c475d489",
+            measurementId: "G-LWPSPNPZN8"
+        };
+
+        // Inicialização Singleton
+        const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // Referência à coleção
+        const comprasCol = collection(db, "compras");
+
+        // Normalização de dados (UI -> Firestore)
+        function normalizeCompra(input) {
+            const fornecedor = String(input?.fornecedor ?? "").trim();
+            const valor = Number(input?.valor ?? 0);
+            
+            // Campos essenciais para o Sistema Malut funcionar
+            const empresa = String(input?.empresa ?? "").trim();
+            const id_visual = String(input?.id_visual ?? "").trim();
+            const dataCompra = String(input?.dataCompra ?? "").trim();
+            
+            // Campos de status da UI
+            const statusNota = String(input?.statusNota ?? "Aguardando");
+            const statusEntrega = String(input?.statusEntrega ?? "Pendente");
+            const statusConcil = String(input?.statusConcil ?? "Pendente");
+            const itens = String(input?.itens ?? "");
+
+            // Mapeamento para os campos solicitados no requisito (schema híbrido)
+            const status = "pendente"; // genérico
+            const notaFiscal = statusNota;
+            const entrega = statusEntrega;
+            const conciliacao = statusConcil;
+            const observacao = itens;
+
+            if (!fornecedor) throw new Error("Fornecedor é obrigatório.");
+            if (!Number.isFinite(valor)) throw new Error("Valor inválido.");
+
+            return {
+                fornecedor, valor, status,
+                empresa, id_visual, dataCompra, // Campos do sistema
+                statusNota, statusEntrega, statusConcil, itens, // Campos UI legados
+                notaFiscal, entrega, conciliacao, observacao // Campos schema solicitado
+            };
+        }
+
+        // API Global
+        window.MalutDB = {
+            async ping() {
+                // Teste simples de leitura (1 doc)
+                const q = query(comprasCol, orderBy("createdAt", "desc"), limit(1));
+                await getDocs(q);
+                return true;
+            },
+
+            async listarCompras() {
+                const q = query(comprasCol, orderBy("createdAt", "desc"));
+                const snap = await getDocs(q);
+                return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            },
+
+            async criarCompra(compra) {
+                const data = normalizeCompra(compra);
+                const ref = await addDoc(comprasCol, {
+                    ...data,
+                    createdAt: serverTimestamp(),
+                    updatedAt: serverTimestamp()
+                });
+                return ref.id;
+            },
+
+            async atualizarCompra(id, patch) {
+                if (!id) throw new Error("ID inválido.");
+                const ref = doc(db, "compras", id);
+                await updateDoc(ref, {
+                    ...patch,
+                    updatedAt: serverTimestamp()
+                });
+                return true;
+            },
+
+            async excluirCompra(id) {
+                if (!id) throw new Error("ID inválido.");
+                const ref = doc(db, "compras", id);
+                await deleteDoc(ref);
+                return true;
+            },
+
+            subscribeCompras(cb, onErr) {
+                const q = query(comprasCol, orderBy("createdAt", "desc"));
+                return onSnapshot(q, 
+                    (snap) => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+                    (err) => {
+                        console.error("Snapshot error:", err);
+                        if(onErr) onErr(err);
+                    }
+                );
+            }
+        };
+
+        // Auto-start
+        (async () => {
+            try {
+                await window.MalutDB.ping();
+                window.dispatchEvent(new CustomEvent("malutdb-ready"));
+                console.log("✅ MalutDB (No-Auth) conectado.");
+                
+                // Smoke tests (comentados)
+                // console.log("Testando criação...");
+                // await MalutDB.criarCompra({ fornecedor: "Teste", valor: 100, empresa: "malut_ferragens" });
+                // console.log("Listando...");
+                // console.log(await MalutDB.listarCompras());
+            } catch (e) {
+                console.error("❌ Falha MalutDB:", e);
+                window.dispatchEvent(new CustomEvent("malutdb-error", { detail: e.message }));
+            }
+        })();
+    </script>
+</head>
+
+<body class="text-slate-800 h-screen flex flex-col overflow-hidden">
+
+    <!-- BADGE 3 BOLAS -->
+    <div id="stuckBadge" class="stuck-badge hidden" onclick="app.toggleStuckMode()">
+        <span class="stuck-dot yellow" id="badge-nota">0</span>
+        <span class="stuck-dot orange" id="badge-entrega">0</span>
+        <span class="stuck-dot blue" id="badge-concil">0</span>
+    </div>
+
+    <!-- HEADER (Mobile Ajustado) -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3">
+        <div class="flex items-center gap-3">
+            <div class="bg-blue-800 text-white p-2 rounded-lg font-bold text-xl w-10 h-10 flex items-center justify-center shadow-lg shadow-blue-800/20">M</div>
+            <div>
+                <h1 class="font-bold text-slate-800 text-lg leading-tight">Sistema Malut</h1>
+                <p class="text-[10px] text-slate-500 font-medium uppercase tracking-wider">Gestão de Compras</p>
+            </div>
+        </div>
+
+        <!-- Seletor Empresa -->
+        <div class="relative w-full sm:w-64">
+            <select id="company-selector" class="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 font-semibold shadow-sm">
+                <option value="malut_ferragens">🔩 Malut Ferragens</option>
+                <option value="malut_pneus">🚗 Malut Pneus</option>
+            </select>
+        </div>
+
+        <div class="w-10 hidden sm:block"></div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+
+        <!-- KPI GRID -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4" id="kpi-container">
+            <!-- Injetado via JS -->
+        </div>
+
+        <!-- TOOLBAR -->
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-center justify-between sticky top-0 z-20">
+            <div class="flex flex-wrap gap-3 w-full md:w-auto items-center">
+                <!-- Busca -->
+                <div class="relative w-full md:w-64">
+                    <i class="fa-solid fa-search absolute left-3 top-3 text-slate-400 text-sm"></i>
+                    <input type="text" id="search-input" class="pl-9 pr-4 py-2 w-full text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="Buscar...">
+                </div>
+
+                <!-- Filtros -->
+                <select id="filter-status" class="py-2 pl-3 pr-8 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer">
+                    <option value="all">Todos os Status</option>
+                    <option value="pendente_nota">Pendente Nota</option>
+                    <option value="aguardando_entrega">Aguardando Entrega</option>
+                    <option value="pendente_concil">Pendente Conciliação</option>
+                    <option value="cancelada">Canceladas</option>
+                    <option value="concluida">Histórico (Concluídas)</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- TABELA -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[400px]">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left text-slate-600">
+                    <thead class="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200 font-bold tracking-wider">
+                        <tr>
+                            <th class="px-6 py-4">Data / ID</th>
+                            <th class="px-6 py-4">Fornecedor</th>
+                            <th class="px-6 py-4">Valor</th>
+                            <th class="px-6 py-4 text-center">Nota Fiscal</th>
+                            <th class="px-6 py-4 text-center">Entrega</th>
+                            <th class="px-6 py-4 text-center">Conciliação</th>
+                            <th class="px-6 py-4 text-right">Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body" class="divide-y divide-slate-100 font-medium">
+                        <!-- Rows via JS -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Empty State -->
+            <div id="empty-state" class="hidden flex flex-col items-center justify-center p-16 text-center">
+                <div class="bg-slate-100 p-6 rounded-full mb-4">
+                    <i class="fa-solid fa-clipboard-list text-slate-300 text-4xl"></i>
+                </div>
+                <h3 class="text-slate-800 font-bold text-lg">Tudo limpo por aqui</h3>
+                <p class="text-slate-400 text-sm mt-1 max-w-xs">Nenhum lançamento encontrado com os filtros atuais.</p>
+            </div>
+        </div>
+
+        <!-- RODAPÉ (Dentro do Main para scroll) -->
+        <footer class="w-full text-center py-6 mt-4 border-t border-slate-200/60">
+            <p class="text-[11px] text-slate-400 font-medium tracking-wide">Desenvolvido por Mais Contabilidade & Soluções Empresariais</p>
+        </footer>
+    </main>
+
+    <!-- FAB BUTTON -->
+    <button onclick="ui.openModal('create')" class="fixed bottom-8 right-8 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl w-16 h-16 shadow-xl shadow-blue-600/40 transition flex items-center justify-center text-2xl z-40 hover:scale-105 active:scale-95 group">
+        <i class="fa-solid fa-plus group-hover:rotate-90 transition duration-300"></i>
+    </button>
+
+    <!-- MODAL -->
+    <div id="modal-overlay" class="fixed inset-0 bg-slate-900/40 hidden z-50 flex items-center justify-center backdrop-blur-sm p-4 transition-all duration-300">
+        <div id="modal-content" class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden transform scale-95 opacity-0 transition-all duration-300">
+
+            <div class="bg-slate-50 px-8 py-5 border-b border-slate-200 flex justify-between items-center">
+                <div>
+                    <h3 id="modal-title" class="text-slate-800 font-bold text-xl">Nova Compra</h3>
+                    <p class="text-slate-500 text-xs mt-0.5">Preencha os dados do lançamento</p>
+                </div>
+                <button onclick="ui.closeModal()" class="text-slate-400 hover:text-red-500 transition p-2">
+                    <i class="fa-solid fa-times text-xl"></i>
+                </button>
+            </div>
+
+            <form id="purchase-form" class="p-8 space-y-6 max-h-[80vh] overflow-y-auto">
+                <input type="hidden" id="edit-id">
+
+                <!-- SELEÇÃO DE EMPRESA (Obrigatória) -->
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                    <label class="block text-xs font-bold text-blue-700 uppercase mb-2">
+                        <i class="fa-solid fa-building mr-1"></i> Empresa
+                    </label>
+                    <select id="inp-empresa" required class="w-full bg-white border border-blue-300 text-slate-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 font-bold shadow-sm">
+                        <option value="">-- Selecione a empresa --</option>
+                        <option value="malut_ferragens">🔩 Malut Ferragens</option>
+                        <option value="malut_pneus">🚗 Malut Pneus</option>
+                    </select>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+                    <div class="md:col-span-4">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Data da Compra</label>
+                        <input type="date" id="inp-data" required class="w-full bg-slate-50 border border-slate-300 text-slate-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 font-semibold">
+                    </div>
+                    <div class="md:col-span-8">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Fornecedor</label>
+                        <input type="text" id="inp-fornecedor" maxlength="100" required class="w-full bg-slate-50 border border-slate-300 text-slate-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 placeholder-slate-400" placeholder="Ex: Fornecedor ABC Ltda">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+                    <div class="md:col-span-4">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Valor Total</label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-slate-500 font-bold">R$</div>
+                            <input type="text" id="inp-valor" required class="pl-10 w-full bg-slate-50 border border-slate-300 text-slate-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 font-bold text-lg" placeholder="0,00">
+                        </div>
+                    </div>
+                    <div class="md:col-span-8">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Descrição dos Itens</label>
+                        <textarea id="inp-itens" rows="2" class="w-full bg-slate-50 border border-slate-300 text-slate-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 resize-none placeholder-slate-400" placeholder="Detalhes dos produtos..."></textarea>
+                    </div>
+                </div>
+
+                <div class="bg-slate-50 rounded-xl p-6 border border-slate-100">
+                    <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-list-check"></i> Status do Processo
+                    </h4>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold text-slate-600">Nota Fiscal</label>
+                            <select id="inp-status-nota" class="w-full p-2.5 text-sm border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm font-medium">
+                                <option value="Aguardando">⏳ Aguardando</option>
+                                <option value="Emitida">✅ Emitida</option>
+                                <option value="NaoEmitira">🚫 Não Emitirá</option>
+                                <option value="Cancelada">❌ Cancelada</option>
+                            </select>
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold text-slate-600">Entrega</label>
+                            <select id="inp-status-entrega" class="w-full p-2.5 text-sm border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm font-medium">
+                                <option value="Pendente">🚚 Pendente</option>
+                                <option value="Sim">📦 Recebida</option>
+                                <option value="Não">⚠️ Problema</option>
+                            </select>
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold text-slate-600">Conciliação Financeira</label>
+                            <select id="inp-status-concil" class="w-full p-2.5 text-sm border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm font-medium">
+                                <option value="Pendente">🕒 Pendente</option>
+                                <option value="Concluída">💲 Concluída</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center pt-2">
+                    <button type="button" onclick="app.deleteItem()" id="btn-delete" class="text-red-500 hover:bg-red-50 hover:text-red-700 px-4 py-2 rounded-lg text-sm font-bold transition hidden flex items-center gap-2">
+                        <i class="fa-solid fa-trash-alt"></i> Excluir
+                    </button>
+                    <div class="flex gap-3 ml-auto">
+                        <button type="button" onclick="ui.closeModal()" class="px-6 py-2.5 text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 text-sm font-bold transition">Cancelar</button>
+                        <button type="submit" class="px-6 py-2.5 text-white bg-blue-600 rounded-lg hover:bg-blue-700 shadow-lg shadow-blue-600/30 text-sm font-bold transition flex items-center gap-2">
+                            <i class="fa-solid fa-check"></i> Salvar
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- TOAST -->
+    <div id="toast-container" class="fixed bottom-6 right-6 z-[60] flex flex-col gap-2"></div>
+
+    <script>
+        // ================= UTILS =================
+        const moneyMask = {
+            format: (val) => {
+                if(!val) return '';
+                let v = val.toString().replace(/\D/g, '');
+                let n = parseInt(v) / 100;
+                return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            },
+            unformat: (val) => {
+                if(!val) return 0;
+                return parseFloat(val.toString().replace(/\./g, '').replace(',', '.')) || 0;
+            }
+        };
+
+        const state = {
+            currentCompany: 'malut_ferragens',
+            purchases: [],
+            filter: { status: 'all', search: '', kpiFilter: null, mode: 'normal' },
+            filtersByStatus: {
+                'pendente_nota': 'geral',
+                'aguardando_entrega': 'geral',
+                'pendente_concil': 'geral',
+                'cancelada': 'geral',
+                'concluida': 'geral'
+            },
+            stuckCounts: { pendenteNota: 0, aguardandoEntrega: 0, pendenteConcil: 0 }
+        };
+
+        const utils = {
+            formatCurrency: (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val),
+            formatDate: (iso) => {
+                if(!iso) return '-';
+                const [y, m, d] = iso.split('-');
+                return `${d}/${m}/${y}`;
+            },
+            generateId: () => '#' + Math.floor(Math.random() * 90000 + 10000),
+            debounce: (func, wait) => {
+                let timeout;
+                return function(...args) {
+                    clearTimeout(timeout);
+                    timeout = setTimeout(() => func.apply(this, args), wait);
+                };
+            },
+            diffDays: (date1, date2) => {
+                const d1 = new Date(date1);
+                const d2 = new Date(date2);
+                return Math.ceil(Math.abs(d1 - d2) / (1000 * 60 * 60 * 24));
+            },
+            isStuckMoreThan3Days: (item) => {
+                const today = new Date();
+                const itemDate = new Date(item.dataCompra);
+                const days = utils.diffDays(today, itemDate);
+                return days > 3 &&
+                       (item.statusNota === 'Aguardando' ||
+                        (item.statusEntrega === 'Pendente' && item.statusNota !== 'Cancelada') ||
+                        (item.statusConcil === 'Pendente' && item.statusNota !== 'Cancelada'));
+            },
+            matchesStatusKey: (item, key) => {
+                if (key === 'pendente_nota') return item.statusNota === 'Aguardando';
+                if (key === 'aguardando_entrega') return item.statusEntrega === 'Pendente' && item.statusNota !== 'Cancelada';
+                if (key === 'pendente_concil') return item.statusConcil === 'Pendente' && item.statusNota !== 'Cancelada';
+                if (key === 'cancelada') return item.statusNota === 'Cancelada';
+                if (key === 'concluida') return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
+                return true;
+            },
+            loadFilters: () => {
+                const stored = localStorage.getItem('filtersByStatus');
+                if(stored) {
+                    const loaded = JSON.parse(stored);
+                    Object.keys(state.filtersByStatus).forEach(key => {
+                        state.filtersByStatus[key] = loaded[key] || 'geral';
+                    });
+                }
+            },
+            saveFilters: () => {
+                localStorage.setItem('filtersByStatus', JSON.stringify(state.filtersByStatus));
+            }
+        };
+
+        // ================= UI =================
+        const ui = {
+            showToast: (msg, type = 'success') => {
+                const container = document.getElementById('toast-container');
+                const el = document.createElement('div');
+                const colors = type === 'success' ? 'bg-emerald-600' : (type === 'error' ? 'bg-red-500' : 'bg-blue-600');
+                el.className = `${colors} text-white px-4 py-3 rounded-lg shadow-xl flex items-center gap-3 fade-in text-sm font-bold min-w-[320px] mb-2`;
+                el.innerHTML = `<i class="fa-solid fa-${type === 'success' ? 'check-circle' : 'info-circle'}"></i> <span>${msg}</span>`;
+                container.appendChild(el);
+                setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3500);
+            },
+
+            openModal: (mode, id = null) => {
+                const overlay = document.getElementById('modal-overlay');
+                const content = document.getElementById('modal-content');
+                const title = document.getElementById('modal-title');
+                const form = document.getElementById('purchase-form');
+                const btnDelete = document.getElementById('btn-delete');
+                const empresaSelect = document.getElementById('inp-empresa');
+
+                overlay.classList.remove('hidden');
+                requestAnimationFrame(() => {
+                    content.classList.remove('scale-95', 'opacity-0');
+                    content.classList.add('scale-100', 'opacity-100');
+                });
+
+                if (mode === 'create') {
+                    title.innerText = 'Nova Compra';
+                    form.reset();
+                    document.getElementById('edit-id').value = '';
+                    document.getElementById('inp-data').value = new Date().toISOString().split('T')[0];
+                    document.getElementById('inp-status-nota').value = 'Aguardando';
+                    document.getElementById('inp-status-entrega').value = 'Pendente';
+                    document.getElementById('inp-status-concil').value = 'Pendente';
+
+                    // Sugestão da empresa atual, mas editável
+                    empresaSelect.value = state.currentCompany;
+                    empresaSelect.disabled = false;
+                    btnDelete.classList.add('hidden');
+                } else {
+                    title.innerText = 'Editar Lançamento';
+                    const item = state.purchases.find(p => p.id === id);
+                    if(item) {
+                        document.getElementById('edit-id').value = item.id;
+                        document.getElementById('inp-data').value = item.dataCompra;
+                        document.getElementById('inp-fornecedor').value = item.fornecedor;
+                        document.getElementById('inp-valor').value = moneyMask.format(item.valor * 100);
+                        document.getElementById('inp-itens').value = item.itens || item.observacao || '';
+                        document.getElementById('inp-status-nota').value = item.statusNota || item.notaFiscal;
+                        document.getElementById('inp-status-entrega').value = item.statusEntrega || item.entrega || 'Pendente';
+                        document.getElementById('inp-status-concil').value = item.statusConcil || item.conciliacao;
+                        
+                        // Trava a empresa na edição
+                        empresaSelect.value = item.empresa || state.currentCompany;
+                        empresaSelect.disabled = true;
+
+                        btnDelete.classList.remove('hidden');
+                        btnDelete.setAttribute('data-id', id);
+                    }
+                }
+            },
+
+            closeModal: () => {
+                const overlay = document.getElementById('modal-overlay');
+                const content = document.getElementById('modal-content');
+                content.classList.remove('scale-100', 'opacity-100');
+                content.classList.add('scale-95', 'opacity-0');
+                setTimeout(() => overlay.classList.add('hidden'), 200);
+            },
+
+            renderKPIs: () => {
+                const data = state.purchases.filter(p => p.empresa === state.currentCompany);
+
+                state.stuckCounts = { pendenteNota: 0, aguardandoEntrega: 0, pendenteConcil: 0 };
+
+                data.forEach(p => {
+                    if (utils.isStuckMoreThan3Days(p)) {
+                        if (p.statusNota === 'Aguardando') state.stuckCounts.pendenteNota++;
+                        else if (p.statusEntrega === 'Pendente') state.stuckCounts.aguardandoEntrega++;
+                        else if (p.statusConcil === 'Pendente') state.stuckCounts.pendenteConcil++;
+                    }
+                });
+
+                const badge = document.getElementById('stuckBadge');
+                document.getElementById('badge-nota').textContent = state.stuckCounts.pendenteNota;
+                document.getElementById('badge-entrega').textContent = state.stuckCounts.aguardandoEntrega;
+                document.getElementById('badge-concil').textContent = state.stuckCounts.pendenteConcil;
+
+                if (Object.values(state.stuckCounts).some(count => count > 0)) {
+                    badge.classList.remove('hidden');
+                } else {
+                    badge.classList.add('hidden');
+                }
+
+                const stats = app.getFilteredStats();
+
+                const statusConfig = [
+                    { key: 'pendente_nota', title: '1. Pendente Nota', color: 'yellow', icon: 'fa-file-invoice', count: stats.pendenteNota },
+                    { key: 'aguardando_entrega', title: '2. Aguardando Entrega', color: 'orange', icon: 'fa-truck-fast', count: stats.aguardandoEntrega },
+                    { key: 'pendente_concil', title: '3. Pend. Conciliação', color: 'blue', icon: 'fa-scale-balanced', count: stats.pendenteConcil },
+                    { key: 'cancelada', title: '4. Canceladas', color: 'red', icon: 'fa-ban', count: stats.canceladas },
+                    { key: 'concluida', title: '5. Histórico', color: 'purple', icon: 'fa-clock-rotate-left', count: stats.historico }
+                ];
+
+                const kpiHTML = (config) => `
+                    <div onclick="app.filterByKPI('${config.key}')" class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-${config.color}-300 transition cursor-pointer group relative overflow-hidden">
+                        <div class="flex justify-between items-start z-10 relative">
+                            <div>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center">
+                                    ${config.title}
+                                    <select class="status-microfilter" data-status="${config.key}" onclick="event.stopPropagation()" onchange="app.setStatusFilter('${config.key}', this.value)">
+                                        <option value="geral">Geral</option>
+                                        <option value="o-que-falta">Oq.falta</option>
+                                    </select>
+                                </p>
+                                <h3 class="text-3xl font-bold text-slate-700 group-hover:text-${config.color}-600 transition">${config.count}</h3>
+                            </div>
+                            <div class="bg-${config.color}-50 text-${config.color}-500 p-2.5 rounded-lg group-hover:scale-110 transition">
+                                <i class="fa-solid ${config.icon} text-lg"></i>
+                            </div>
+                        </div>
+                        <div class="absolute bottom-0 left-0 w-full h-1 bg-${config.color}-500 transform scale-x-0 group-hover:scale-x-100 transition duration-300"></div>
+                    </div>
+                `;
+
+                document.getElementById('kpi-container').innerHTML = statusConfig.map(kpiHTML).join('');
+
+                statusConfig.forEach(config => {
+                    const select = document.querySelector(`[data-status="${config.key}"]`);
+                    if(select) select.value = state.filtersByStatus[config.key];
+                });
+            },
+
+            renderTable: () => {
+                const tbody = document.getElementById('table-body');
+                tbody.innerHTML = '';
+
+                const today = new Date();
+
+                let filtered = state.purchases.filter(item => {
+                    if(item.empresa !== state.currentCompany) return false;
+
+                    const term = (state.filter.search || '').toLowerCase();
+                    const matchSearch =
+                        (item.fornecedor || '').toLowerCase().includes(term) ||
+                        (item.id_visual || '').toLowerCase().includes(term);
+
+                    if(state.filter.mode === 'stuck') {
+                        return utils.isStuckMoreThan3Days(item) && matchSearch;
+                    }
+
+                    let matchStatus = true;
+                    const checkStatus = (key) => utils.matchesStatusKey(item, key);
+
+                    const filterKey = state.filter.kpiFilter || state.filter.status;
+                    if(filterKey !== 'all') matchStatus = checkStatus(filterKey);
+
+                    if(filterKey !== 'all' && matchStatus) {
+                        const filterType = state.filtersByStatus[filterKey];
+                        switch(filterType) {
+                            case 'o-que-falta':
+                                matchStatus = true;
+                                break;
+                            default:
+                                matchStatus = true;
+                                break;
+                        }
+                    }
+
+                    return matchSearch && matchStatus;
+                });
+
+                filtered.sort((a,b) => new Date(b.dataCompra) - new Date(a.dataCompra));
+
+                if(filtered.length === 0) {
+                    document.getElementById('empty-state').classList.remove('hidden');
+                    return;
+                }
+                document.getElementById('empty-state').classList.add('hidden');
+
+                filtered.forEach(item => {
+                    const badgeNota = {
+                        'Aguardando': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Aguardando</span>',
+                        'Emitida': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">Emitida</span>',
+                        'NaoEmitira': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 line-through">Não Emitirá</span>',
+                        'Cancelada': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200">Cancelada</span>'
+                    }[item.statusNota] || '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">-</span>';
+
+                    let badgeEntrega = '';
+                    if (!item.statusEntrega || item.statusEntrega === 'Pendente') badgeEntrega = '<span class="text-orange-500 font-medium text-xs"><i class="fa-solid fa-clock mr-1"></i> Pendente</span>';
+                    else if (item.statusEntrega === 'Sim') badgeEntrega = '<span class="text-emerald-600 font-bold text-xs"><i class="fa-solid fa-check mr-1"></i> Recebida</span>';
+                    else badgeEntrega = '<span class="text-red-500 font-bold text-xs"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Problema</span>';
+
+                    let concilIcon = item.statusConcil === 'Concluída'
+                        ? '<i class="fa-solid fa-circle-check text-emerald-500 text-lg"></i>'
+                        : '<div class="w-3 h-3 rounded-full bg-slate-200 border border-slate-300 mx-auto" title="Pendente"></div>';
+
+                    const isStuck = utils.isStuckMoreThan3Days(item);
+                    const rowClass = isStuck ? 'bg-red-50/50 hover:bg-red-50' : 'bg-white hover:bg-slate-50';
+
+                    const row = `
+                        <tr class="${rowClass} transition border-b border-slate-100 group">
+                            <td class="px-6 py-4">
+                                <div class="font-bold text-slate-700">${utils.formatDate(item.dataCompra)}</div>
+                                <div class="text-[11px] text-slate-400 font-mono">${item.id_visual || '-'}</div>
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="font-bold text-slate-700 text-sm">${item.fornecedor || '-'}</div>
+                                <div class="text-xs text-slate-500 truncate max-w-[140px]">${item.itens || '-'}</div>
+                            </td>
+                            <td class="px-6 py-4 font-bold text-slate-700">${utils.formatCurrency(item.valor || 0)}</td>
+                            <td class="px-6 py-4 text-center">${badgeNota}</td>
+                            <td class="px-6 py-4 text-center">${badgeEntrega}</td>
+                            <td class="px-6 py-4 text-center">${concilIcon}</td>
+                            <td class="px-6 py-4 text-right">
+                                <button onclick="ui.openModal('edit', '${item.id}')" class="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition">
+                                    <i class="fa-solid fa-pen-to-square"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+            }
+        };
+
+        // ================= APP =================
+        const app = {
+            init: () => {
+                utils.loadFilters();
+                
+                // Conectar ao Firebase quando pronto
+                window.addEventListener('malutdb-ready', () => {
+                    ui.showToast('Conectado ao Firebase!', 'success');
+                    
+                    // Escuta alterações em tempo real
+                    window.MalutDB.subscribeCompras((lista) => {
+                        state.purchases = lista;
+                        ui.renderKPIs();
+                        ui.renderTable();
+                    }, (err) => {
+                        console.error(err);
+                        ui.showToast('Erro Realtime: ' + err.code, 'error');
+                    });
+                });
+
+                // Listeners UI
+                document.getElementById('company-selector').addEventListener('change', (e) => {
+                    state.currentCompany = e.target.value;
+                    state.filter.kpiFilter = null;
+                    state.filter.status = 'all';
+                    state.filter.mode = 'normal';
+                    document.getElementById('filter-status').value = 'all';
+                    ui.renderKPIs();
+                    ui.renderTable();
+                });
+
+                document.getElementById('search-input').addEventListener('input', utils.debounce((e) => {
+                    state.filter.search = e.target.value;
+                    ui.renderTable();
+                }, 300));
+
+                document.getElementById('filter-status').addEventListener('change', (e) => {
+                    state.filter.status = e.target.value;
+                    state.filter.kpiFilter = null;
+                    state.filter.mode = 'normal';
+                    ui.renderTable();
+                });
+
+                document.getElementById('inp-valor').addEventListener('input', (e) => {
+                    e.target.value = moneyMask.format(e.target.value);
+                });
+
+                // Salvar (Create/Update)
+                document.getElementById('purchase-form').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const editId = document.getElementById('edit-id').value;
+                    const item = editId ? state.purchases.find(p => p.id === editId) : null;
+
+                    // Senha Retrocesso
+                    const statusOrder = { 'Aguardando': 1, 'Emitida': 2, 'NaoEmitira': 3, 'Cancelada': 4, 'Pendente': 1, 'Sim': 2, 'Não': 3, 'Concluída': 4 };
+
+                    if(item) {
+                        const notaNew = document.getElementById('inp-status-nota').value;
+                        const entregaNew = document.getElementById('inp-status-entrega').value;
+                        const concilNew = document.getElementById('inp-status-concil').value;
+
+                        if(statusOrder[notaNew] < statusOrder[item.statusNota] ||
+                           statusOrder[entregaNew] < statusOrder[item.statusEntrega] ||
+                           statusOrder[concilNew] < statusOrder[item.statusConcil]) {
+                            if(prompt("Senha retrocesso:") !== "1896") {
+                                ui.showToast('Operação cancelada.', 'error');
+                                return;
+                            }
+                        }
+                    }
+
+                    const payload = {
+                        dataCompra: document.getElementById('inp-data').value,
+                        fornecedor: document.getElementById('inp-fornecedor').value,
+                        valor: moneyMask.unformat(document.getElementById('inp-valor').value),
+                        itens: document.getElementById('inp-itens').value,
+                        statusNota: document.getElementById('inp-status-nota').value,
+                        statusEntrega: document.getElementById('inp-status-entrega').value,
+                        statusConcil: document.getElementById('inp-status-concil').value
+                    };
+
+                    try {
+                        if (editId) {
+                            await window.MalutDB.atualizarCompra(editId, payload);
+                            ui.showToast('Atualizado!');
+                        } else {
+                            const empresaSelecionada = document.getElementById('inp-empresa').value;
+                            if(!empresaSelecionada) {
+                                ui.showToast('Selecione a empresa!', 'error');
+                                return;
+                            }
+                            
+                            payload.empresa = empresaSelecionada;
+                            payload.id_visual = utils.generateId();
+                            
+                            await window.MalutDB.criarCompra(payload);
+                            ui.showToast('Salvo!');
+                        }
+                        ui.closeModal();
+                    } catch(err) {
+                        console.error(err);
+                        ui.showToast('Erro ao salvar: ' + err.message, 'error');
+                    }
+                });
+            },
+
+            setStatusFilter: (statusKey, filterValue) => {
+                state.filtersByStatus[statusKey] = filterValue;
+                state.filter.mode = 'normal';
+                utils.saveFilters();
+                ui.renderKPIs();
+                ui.renderTable();
+            },
+
+            getFilteredStats: () => {
+                const data = state.purchases.filter(p => p.empresa === state.currentCompany);
+                const stats = {
+                    pendenteNota: 0,
+                    aguardandoEntrega: 0,
+                    pendenteConcil: 0,
+                    canceladas: 0,
+                    historico: 0
+                };
+
+                data.forEach(item => {
+                    if (utils.matchesStatusKey(item, 'pendente_nota')) stats.pendenteNota++;
+                    if (utils.matchesStatusKey(item, 'aguardando_entrega')) stats.aguardandoEntrega++;
+                    if (utils.matchesStatusKey(item, 'pendente_concil')) stats.pendenteConcil++;
+                    if (utils.matchesStatusKey(item, 'cancelada')) stats.canceladas++;
+                    if (utils.matchesStatusKey(item, 'concluida')) stats.historico++;
+                });
+
+                return stats;
+            },
+
+            filterByKPI: (key) => {
+                state.filter.kpiFilter = key;
+                state.filter.status = 'all';
+                state.filter.mode = 'normal';
+                document.getElementById('filter-status').value = 'all';
+                ui.renderTable();
+                ui.showToast(`Filtro aplicado: ${key}`);
+            },
+
+            toggleStuckMode: () => {
+                if(state.filter.mode === 'stuck') {
+                    state.filter.mode = 'normal';
+                    ui.showToast('Modo normal restaurado');
+                } else {
+                    state.filter.mode = 'stuck';
+                    state.filter.kpiFilter = null;
+                    state.filter.status = 'all';
+                    document.getElementById('filter-status').value = 'all';
+                    ui.showToast('Exibindo travados > 3 dias', 'error');
+                }
+                ui.renderTable();
+            },
+
+            deleteItem: async () => {
+                const id = document.getElementById('btn-delete').getAttribute('data-id');
+                const pwd = prompt("Senha Administrativa:");
+                if (pwd === "63258116") {
+                    try {
+                        await window.MalutDB.excluirCompra(id);
+                        ui.showToast('Excluído!', 'error');
+                        ui.closeModal();
+                    } catch(err) {
+                        ui.showToast('Erro ao excluir: ' + err.message, 'error');
+                    }
+                } else if(pwd) {
+                    ui.showToast('Senha incorreta.', 'error');
+                }
+            }
+        };
+
+        app.init();
+    </script>
+</body>
+</html>
