@@ -219,7 +219,6 @@
     <!-- BADGE 3 BOLAS -->
     <div id="stuckBadge" class="stuck-badge hidden" onclick="app.toggleStuckMode()">
         <span class="stuck-dot yellow" id="badge-nota">0</span>
-        <span class="stuck-dot orange" id="badge-entrega">0</span>
         <span class="stuck-dot blue" id="badge-concil">0</span>
     </div>
 
@@ -253,7 +252,7 @@
         </div>
 
         <!-- TOOLBAR -->
-        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-center justify-between sticky top-0 z-20">
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-center justify-between ">
             <div class="flex flex-wrap gap-3 w-full md:w-auto items-center">
                 <!-- Busca -->
                 <div class="relative w-full md:w-64">
@@ -265,7 +264,6 @@
                 <select id="filter-status" class="py-2 pl-3 pr-8 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer">
                     <option value="all">Todos os Status</option>
                     <option value="pendente_nota">Pendente Nota</option>
-                    <option value="aguardando_entrega">Aguardando Entrega</option>
                     <option value="pendente_concil">Pendente Conciliação</option>
                     <option value="cancelada">Canceladas</option>
                     <option value="concluida">Histórico (Concluídas)</option>
@@ -281,9 +279,9 @@
                         <tr>
                             <th class="px-6 py-4">Data / ID</th>
                             <th class="px-6 py-4">Fornecedor</th>
+                                <th class="px-6 py-4">Descrição</th>
                             <th class="px-6 py-4">Valor</th>
                             <th class="px-6 py-4 text-center">Nota Fiscal</th>
-                            <th class="px-6 py-4 text-center">Entrega</th>
                             <th class="px-6 py-4 text-center">Conciliação</th>
                             <th class="px-6 py-4 text-right">Ações</th>
                         </tr>
@@ -386,15 +384,6 @@
                         </div>
 
                         <div class="space-y-2">
-                            <label class="text-xs font-bold text-slate-600">Entrega</label>
-                            <select id="inp-status-entrega" class="w-full p-2.5 text-sm border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm font-medium">
-                                <option value="Pendente">🚚 Pendente</option>
-                                <option value="Sim">📦 Recebida</option>
-                                <option value="Não">⚠️ Problema</option>
-                            </select>
-                        </div>
-
-                        <div class="space-y-2">
                             <label class="text-xs font-bold text-slate-600">Conciliação Financeira</label>
                             <select id="inp-status-concil" class="w-full p-2.5 text-sm border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm font-medium">
                                 <option value="Pendente">🕒 Pendente</option>
@@ -443,12 +432,11 @@
             filter: { status: 'all', search: '', kpiFilter: null, mode: 'normal' },
             filtersByStatus: {
                 'pendente_nota': 'geral',
-                'aguardando_entrega': 'geral',
                 'pendente_concil': 'geral',
                 'cancelada': 'geral',
                 'concluida': 'geral'
             },
-            stuckCounts: { pendenteNota: 0, aguardandoEntrega: 0, pendenteConcil: 0 }
+            stuckCounts: { pendenteNota: 0, pendenteConcil: 0 }
         };
 
         const utils = {
@@ -477,12 +465,10 @@
                 const days = utils.diffDays(today, itemDate);
                 return days > 3 &&
                        (item.statusNota === 'Aguardando' ||
-                        (item.statusEntrega === 'Pendente' && item.statusNota !== 'Cancelada') ||
                         (item.statusConcil === 'Pendente' && item.statusNota !== 'Cancelada'));
             },
             matchesStatusKey: (item, key) => {
                 if (key === 'pendente_nota') return item.statusNota === 'Aguardando';
-                if (key === 'aguardando_entrega') return item.statusEntrega === 'Pendente' && item.statusNota !== 'Cancelada';
                 if (key === 'pendente_concil') return item.statusConcil === 'Pendente' && item.statusNota !== 'Cancelada';
                 if (key === 'cancelada') return item.statusNota === 'Cancelada';
                 if (key === 'concluida') return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
@@ -534,7 +520,6 @@
                     document.getElementById('edit-id').value = '';
                     document.getElementById('inp-data').value = new Date().toISOString().split('T')[0];
                     document.getElementById('inp-status-nota').value = 'Aguardando';
-                    document.getElementById('inp-status-entrega').value = 'Pendente';
                     document.getElementById('inp-status-concil').value = 'Pendente';
 
                     // Sugestão da empresa atual, mas editável
@@ -551,7 +536,6 @@
                         document.getElementById('inp-valor').value = moneyMask.format(item.valor * 100);
                         document.getElementById('inp-itens').value = item.itens || item.observacao || '';
                         document.getElementById('inp-status-nota').value = item.statusNota || item.notaFiscal;
-                        document.getElementById('inp-status-entrega').value = item.statusEntrega || item.entrega || 'Pendente';
                         document.getElementById('inp-status-concil').value = item.statusConcil || item.conciliacao;
                         
                         // Trava a empresa na edição
@@ -575,19 +559,17 @@
             renderKPIs: () => {
                 const data = state.purchases.filter(p => p.empresa === state.currentCompany);
 
-                state.stuckCounts = { pendenteNota: 0, aguardandoEntrega: 0, pendenteConcil: 0 };
+                state.stuckCounts = { pendenteNota: 0, pendenteConcil: 0 };
 
                 data.forEach(p => {
                     if (utils.isStuckMoreThan3Days(p)) {
                         if (p.statusNota === 'Aguardando') state.stuckCounts.pendenteNota++;
-                        else if (p.statusEntrega === 'Pendente') state.stuckCounts.aguardandoEntrega++;
                         else if (p.statusConcil === 'Pendente') state.stuckCounts.pendenteConcil++;
                     }
                 });
 
                 const badge = document.getElementById('stuckBadge');
                 document.getElementById('badge-nota').textContent = state.stuckCounts.pendenteNota;
-                document.getElementById('badge-entrega').textContent = state.stuckCounts.aguardandoEntrega;
                 document.getElementById('badge-concil').textContent = state.stuckCounts.pendenteConcil;
 
                 if (Object.values(state.stuckCounts).some(count => count > 0)) {
@@ -600,10 +582,9 @@
 
                 const statusConfig = [
                     { key: 'pendente_nota', title: '1. Pendente Nota', color: 'yellow', icon: 'fa-file-invoice', count: stats.pendenteNota },
-                    { key: 'aguardando_entrega', title: '2. Aguardando Entrega', color: 'orange', icon: 'fa-truck-fast', count: stats.aguardandoEntrega },
-                    { key: 'pendente_concil', title: '3. Pend. Conciliação', color: 'blue', icon: 'fa-scale-balanced', count: stats.pendenteConcil },
-                    { key: 'cancelada', title: '4. Canceladas', color: 'red', icon: 'fa-ban', count: stats.canceladas },
-                    { key: 'concluida', title: '5. Histórico', color: 'purple', icon: 'fa-clock-rotate-left', count: stats.historico }
+                    { key: 'pendente_concil', title: '2. Pend. Conciliação', color: 'blue', icon: 'fa-scale-balanced', count: stats.pendenteConcil },
+                    { key: 'cancelada', title: '3. Canceladas', color: 'red', icon: 'fa-ban', count: stats.canceladas },
+                    { key: 'concluida', title: '4. Histórico', color: 'purple', icon: 'fa-clock-rotate-left', count: stats.historico }
                 ];
 
                 const kpiHTML = (config) => `
@@ -690,11 +671,6 @@
                         'Cancelada': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200">Cancelada</span>'
                     }[item.statusNota] || '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">-</span>';
 
-                    let badgeEntrega = '';
-                    if (!item.statusEntrega || item.statusEntrega === 'Pendente') badgeEntrega = '<span class="text-orange-500 font-medium text-xs"><i class="fa-solid fa-clock mr-1"></i> Pendente</span>';
-                    else if (item.statusEntrega === 'Sim') badgeEntrega = '<span class="text-emerald-600 font-bold text-xs"><i class="fa-solid fa-check mr-1"></i> Recebida</span>';
-                    else badgeEntrega = '<span class="text-red-500 font-bold text-xs"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Problema</span>';
-
                     let concilIcon = item.statusConcil === 'Concluída'
                         ? '<i class="fa-solid fa-circle-check text-emerald-500 text-lg"></i>'
                         : '<div class="w-3 h-3 rounded-full bg-slate-200 border border-slate-300 mx-auto" title="Pendente"></div>';
@@ -710,11 +686,12 @@
                             </td>
                             <td class="px-6 py-4">
                                 <div class="font-bold text-slate-700 text-sm">${item.fornecedor || '-'}</div>
-                                <div class="text-xs text-slate-500 truncate max-w-[140px]">${item.itens || '-'}</div>
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="text-xs text-slate-500">${item.itens || '-'}</div>
                             </td>
                             <td class="px-6 py-4 font-bold text-slate-700">${utils.formatCurrency(item.valor || 0)}</td>
                             <td class="px-6 py-4 text-center">${badgeNota}</td>
-                            <td class="px-6 py-4 text-center">${badgeEntrega}</td>
                             <td class="px-6 py-4 text-center">${concilIcon}</td>
                             <td class="px-6 py-4 text-right">
                                 <button onclick="ui.openModal('edit', '${item.id}')" class="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition">
@@ -786,11 +763,9 @@
 
                     if(item) {
                         const notaNew = document.getElementById('inp-status-nota').value;
-                        const entregaNew = document.getElementById('inp-status-entrega').value;
                         const concilNew = document.getElementById('inp-status-concil').value;
 
                         if(statusOrder[notaNew] < statusOrder[item.statusNota] ||
-                           statusOrder[entregaNew] < statusOrder[item.statusEntrega] ||
                            statusOrder[concilNew] < statusOrder[item.statusConcil]) {
                             if(prompt("Senha retrocesso:") !== "1896") {
                                 ui.showToast('Operação cancelada.', 'error');
@@ -805,7 +780,6 @@
                         valor: moneyMask.unformat(document.getElementById('inp-valor').value),
                         itens: document.getElementById('inp-itens').value,
                         statusNota: document.getElementById('inp-status-nota').value,
-                        statusEntrega: document.getElementById('inp-status-entrega').value,
                         statusConcil: document.getElementById('inp-status-concil').value
                     };
 
@@ -846,7 +820,6 @@
                 const data = state.purchases.filter(p => p.empresa === state.currentCompany);
                 const stats = {
                     pendenteNota: 0,
-                    aguardandoEntrega: 0,
                     pendenteConcil: 0,
                     canceladas: 0,
                     historico: 0
@@ -854,7 +827,6 @@
 
                 data.forEach(item => {
                     if (utils.matchesStatusKey(item, 'pendente_nota')) stats.pendenteNota++;
-                    if (utils.matchesStatusKey(item, 'aguardando_entrega')) stats.aguardandoEntrega++;
                     if (utils.matchesStatusKey(item, 'pendente_concil')) stats.pendenteConcil++;
                     if (utils.matchesStatusKey(item, 'cancelada')) stats.canceladas++;
                     if (utils.matchesStatusKey(item, 'concluida')) stats.historico++;
