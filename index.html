@@ -414,6 +414,47 @@
 
         const utils = {
             formatCurrency: (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val),
+            normalizeSearchText: (value) => String(value ?? '')
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[̀-ͯ]/g, '')
+                .trim(),
+            normalizeCurrencySearch: (value) => {
+                const raw = String(value ?? '').replace(/\s+/g, '');
+                const digits = raw.replace(/\D/g, '');
+                return {
+                    raw,
+                    digits,
+                    decimalComma: digits ? (Number(digits) / 100).toFixed(2).replace('.', ',') : '',
+                    decimalDot: digits ? (Number(digits) / 100).toFixed(2) : ''
+                };
+            },
+            matchesSearchTerm: (item, term) => {
+                if (!term) return true;
+
+                const normalizedTerm = utils.normalizeSearchText(term);
+                const currencySearch = utils.normalizeCurrencySearch(term);
+                const fornecedor = utils.normalizeSearchText(item.fornecedor);
+                const idVisual = utils.normalizeSearchText(item.id_visual);
+                const descricao = utils.normalizeSearchText(item.itens || item.observacao || '');
+                const dataCompra = utils.normalizeSearchText(utils.formatDate(item.dataCompra || ''));
+                const valorNumber = Number(item.valor || 0);
+                const valorBR = utils.normalizeSearchText(utils.formatCurrency(valorNumber));
+                const valorFixed = valorNumber.toFixed(2);
+                const valorComma = valorFixed.replace('.', ',');
+                const valorDigits = valorFixed.replace(/\D/g, '');
+
+                return fornecedor.includes(normalizedTerm)
+                    || idVisual.includes(normalizedTerm)
+                    || descricao.includes(normalizedTerm)
+                    || dataCompra.includes(normalizedTerm)
+                    || valorBR.includes(normalizedTerm)
+                    || (currencySearch.raw && valorFixed.includes(currencySearch.raw))
+                    || (currencySearch.raw && valorComma.includes(currencySearch.raw))
+                    || (currencySearch.decimalDot && valorFixed.includes(currencySearch.decimalDot))
+                    || (currencySearch.decimalComma && valorComma.includes(currencySearch.decimalComma))
+                    || (currencySearch.digits && valorDigits.includes(currencySearch.digits));
+            },
             formatDate: (iso) => {
                 if(!iso) return '-';
                 const [y, m, d] = iso.split('-');
@@ -678,8 +719,8 @@
 
                 // Aplica Filtros de Texto e Status Específico da Tabela
                 filtered = filtered.filter(item => {
-                    const term = (state.filter.search || '').toLowerCase();
-                    const matchSearch = (item.fornecedor || '').toLowerCase().includes(term) || (item.id_visual || '').toLowerCase().includes(term);
+                    const term = state.filter.search || '';
+                    const matchSearch = utils.matchesSearchTerm(item, term);
 
                     if(state.filter.mode === 'stuck') {
                         return utils.isStuckMoreThan3Days(item) && matchSearch;
