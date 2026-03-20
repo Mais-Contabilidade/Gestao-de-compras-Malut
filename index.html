@@ -594,18 +594,34 @@
 
             renderCharts: () => {
                 const baseData = app.getBaseData();
+                let chartBaseData = [...baseData];
+
+                if (state.filter.mode === 'stuck') {
+                    chartBaseData = chartBaseData.filter(item => utils.isStuckMoreThan3Days(item));
+                } else {
+                    const activeKey = state.filter.kpiFilter || state.filter.status;
+                    if (activeKey && activeKey !== 'all') {
+                        chartBaseData = chartBaseData.filter(item => utils.matchesStatusKey(item, activeKey));
+                    }
+                }
+
+                const notasData = app.getDataForStatusCard(chartBaseData, 'pendente_nota');
+                const concilData = app.getDataForStatusCard(chartBaseData, 'pendente_concil');
                 const mapNotas = {};
                 const mapConcil = {};
 
-                baseData.forEach(item => {
+                notasData.forEach(item => {
                     if (!item.dataCompra) return;
-                    const monthYear = item.dataCompra.substring(0, 7); // Ex: 2023-10
-
+                    const monthYear = item.dataCompra.substring(0, 7);
                     if (!mapNotas[monthYear]) mapNotas[monthYear] = 0;
-                    if (!mapConcil[monthYear]) mapConcil[monthYear] = 0;
+                    mapNotas[monthYear]++;
+                });
 
-                    if (utils.matchesStatusKey(item, 'pendente_nota')) mapNotas[monthYear]++;
-                    if (utils.matchesStatusKey(item, 'pendente_concil')) mapConcil[monthYear]++;
+                concilData.forEach(item => {
+                    if (!item.dataCompra) return;
+                    const monthYear = item.dataCompra.substring(0, 7);
+                    if (!mapConcil[monthYear]) mapConcil[monthYear] = 0;
+                    mapConcil[monthYear]++;
                 });
 
                 // Ordenar labels cronologicamente
@@ -762,7 +778,8 @@
                     state.filter.status = e.target.value;
                     state.filter.kpiFilter = null;
                     state.filter.mode = 'normal';
-                    ui.renderTable(); // Status não afeta KPIs nem Gráficos
+                    ui.renderCharts();
+                    ui.renderTable();
                 });
 
                 // Listeners de Data (Afetam TODOS as visualizações)
@@ -896,18 +913,40 @@
                 state.filtersByStatus[statusKey] = filterValue;
                 state.filter.mode = 'normal';
                 utils.saveFilters();
-                ui.renderKPIs();
-                ui.renderTable();
+                app.updateAllViews();
+            },
+
+            getDataForStatusCard: (baseData, statusKey) => {
+                const microFilter = state.filtersByStatus[statusKey] || 'geral';
+
+                return baseData.filter(item => {
+                    if (!utils.matchesStatusKey(item, statusKey)) return false;
+
+                    if (microFilter === 'o-que-falta') {
+                        if (statusKey === 'pendente_nota') {
+                            return item.statusNota === 'Aguardando';
+                        }
+                        if (statusKey === 'pendente_concil') {
+                            return item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira');
+                        }
+                        if (statusKey === 'cancelada') {
+                            return item.statusNota === 'Cancelada';
+                        }
+                        if (statusKey === 'concluida') {
+                            return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
+                        }
+                    }
+
+                    return true;
+                });
             },
 
             getFilteredStats: (baseData) => {
                 const stats = { pendenteNota: 0, pendenteConcil: 0, canceladas: 0, historico: 0 };
-                baseData.forEach(item => {
-                    if (utils.matchesStatusKey(item, 'pendente_nota')) stats.pendenteNota++;
-                    if (utils.matchesStatusKey(item, 'pendente_concil')) stats.pendenteConcil++;
-                    if (utils.matchesStatusKey(item, 'cancelada')) stats.canceladas++;
-                    if (utils.matchesStatusKey(item, 'concluida')) stats.historico++;
-                });
+                stats.pendenteNota = app.getDataForStatusCard(baseData, 'pendente_nota').length;
+                stats.pendenteConcil = app.getDataForStatusCard(baseData, 'pendente_concil').length;
+                stats.canceladas = app.getDataForStatusCard(baseData, 'cancelada').length;
+                stats.historico = app.getDataForStatusCard(baseData, 'concluida').length;
                 return stats;
             },
 
