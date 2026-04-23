@@ -74,7 +74,7 @@
         import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
         import {
             getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
-            serverTimestamp, query, orderBy, onSnapshot, limit
+            serverTimestamp, query, orderBy, onSnapshot, limit, where
         } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
         const firebaseConfig = {
@@ -142,10 +142,10 @@
                 await deleteDoc(ref);
                 return true;
             },
-            subscribeCompras(cb, onErr) {
-                const q = query(comprasCol, orderBy("createdAt", "desc"));
-                return onSnapshot(q, 
-                    (snap) => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+            subscribeCompras(empresa, cb, onErr) {
+                const q = query(comprasCol, where("empresa", "==", empresa));
+                return onSnapshot(q,
+                    (snap) => cb(snap),
                     (err) => { console.error("Snapshot error:", err); if(onErr) onErr(err); }
                 );
             }
@@ -271,6 +271,24 @@
                 <h3 class="text-slate-800 font-bold text-lg">Tudo limpo por aqui</h3>
                 <p class="text-slate-400 text-sm mt-1 max-w-xs">Nenhum lançamento encontrado com os filtros atuais.</p>
             </div>
+            <div id="table-pagination" class="hidden border-t border-slate-200 bg-slate-50 px-4 sm:px-6 py-3 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+                <div class="flex items-center gap-3 text-xs sm:text-sm text-slate-500 font-medium">
+                    <span id="table-range">Exibindo 0 de 0</span>
+                    <div class="flex items-center gap-2">
+                        <label for="page-size" class="text-slate-400">Por página</label>
+                        <select id="page-size" class="py-1.5 pl-2 pr-7 text-xs sm:text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer">
+                            <option value="50">50</option>
+                            <option value="100" selected>100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 sm:justify-end">
+                    <button id="page-prev" type="button" class="px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Anterior</button>
+                    <span id="page-indicator" class="min-w-[88px] text-center text-xs sm:text-sm text-slate-500 font-semibold">Página 1 de 1</span>
+                    <button id="page-next" type="button" class="px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Próxima</button>
+                </div>
+            </div>
         </div>
 
         <footer class="w-full text-center py-6 mt-4 border-t border-slate-200/60">
@@ -375,89 +393,76 @@
     <div id="toast-container" class="fixed bottom-6 right-6 z-[70] flex flex-col gap-2"></div>
 
     <script>
+        const dom = {};
+
         // ================= UTILS =================
         const moneyMask = {
             format: (val) => {
                 if(!val) return '';
-                let v = val.toString().replace(/\D/g, '');
-                let n = parseInt(v) / 100;
-                return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const digits = String(val).replace(/\D/g, '');
+                const number = parseInt(digits || '0', 10) / 100;
+                return number.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             },
             unformat: (val) => {
                 if(!val) return 0;
-                return parseFloat(val.toString().replace(/\./g, '').replace(',', '.')) || 0;
+                return parseFloat(String(val).replace(/\./g, '').replace(',', '.')) || 0;
             }
         };
 
         const state = {
             currentCompany: 'malut_ferragens',
+            purchasesMap: new Map(),
             purchases: [],
+            purchasesVersion: 0,
             isSticky: false,
-            filter: { 
-                status: 'all', 
-                search: '', 
-                kpiFilter: null, 
+            unsubscribeCompras: null,
+            renderScheduled: false,
+            pendingRenderFlags: { kpis: false, charts: false, table: false },
+            cache: {
+                baseKey: null,
+                baseData: [],
+                tableKey: null,
+                tableData: [],
+                chartKey: null,
+                chartData: null,
+                kpiKey: null,
+                kpiData: null
+            },
+            filter: {
+                status: 'all',
+                search: '',
+                kpiFilter: null,
                 mode: 'normal',
-                dateMode: 'all',  // all, month, custom
-                dateMonth: '', 
-                dateStart: '', 
+                dateMode: 'all',
+                dateMonth: '',
+                dateStart: '',
                 dateEnd: ''
             },
+            table: {
+                page: 1,
+                pageSize: 100
+            },
             filtersByStatus: {
-                'pendente_nota': 'geral',
-                'pendente_concil': 'geral',
-                'cancelada': 'geral',
-                'concluida': 'geral'
+                pendente_nota: 'geral',
+                pendente_concil: 'geral',
+                cancelada: 'geral',
+                concluida: 'geral'
             },
             stuckCounts: { pendenteNota: 0, pendenteConcil: 0 }
         };
 
+        const formatCurrencyIntl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+
         const utils = {
-            formatCurrency: (val) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val),
+            formatCurrency: (val) => formatCurrencyIntl.format(Number(val || 0)),
             normalizeSearchText: (value) => String(value ?? '')
                 .toLowerCase()
                 .normalize('NFD')
-                .replace(/[̀-ͯ]/g, '')
+                .replace(/[\u0300-\u036f]/g, '')
                 .trim(),
-            normalizeCurrencySearch: (value) => {
-                const raw = String(value ?? '').replace(/\s+/g, '');
-                const digits = raw.replace(/\D/g, '');
-                return {
-                    raw,
-                    digits,
-                    decimalComma: digits ? (Number(digits) / 100).toFixed(2).replace('.', ',') : '',
-                    decimalDot: digits ? (Number(digits) / 100).toFixed(2) : ''
-                };
-            },
-            matchesSearchTerm: (item, term) => {
-                if (!term) return true;
-
-                const normalizedTerm = utils.normalizeSearchText(term);
-                const currencySearch = utils.normalizeCurrencySearch(term);
-                const fornecedor = utils.normalizeSearchText(item.fornecedor);
-                const idVisual = utils.normalizeSearchText(item.id_visual);
-                const descricao = utils.normalizeSearchText(item.itens || item.observacao || '');
-                const dataCompra = utils.normalizeSearchText(utils.formatDate(item.dataCompra || ''));
-                const valorNumber = Number(item.valor || 0);
-                const valorBR = utils.normalizeSearchText(utils.formatCurrency(valorNumber));
-                const valorFixed = valorNumber.toFixed(2);
-                const valorComma = valorFixed.replace('.', ',');
-                const valorDigits = valorFixed.replace(/\D/g, '');
-
-                return fornecedor.includes(normalizedTerm)
-                    || idVisual.includes(normalizedTerm)
-                    || descricao.includes(normalizedTerm)
-                    || dataCompra.includes(normalizedTerm)
-                    || valorBR.includes(normalizedTerm)
-                    || (currencySearch.raw && valorFixed.includes(currencySearch.raw))
-                    || (currencySearch.raw && valorComma.includes(currencySearch.raw))
-                    || (currencySearch.decimalDot && valorFixed.includes(currencySearch.decimalDot))
-                    || (currencySearch.decimalComma && valorComma.includes(currencySearch.decimalComma))
-                    || (currencySearch.digits && valorDigits.includes(currencySearch.digits));
-            },
             formatDate: (iso) => {
-                if(!iso) return '-';
-                const [y, m, d] = iso.split('-');
+                if (!iso) return '-';
+                const [y, m, d] = String(iso).split('-');
                 return `${d}/${m}/${y}`;
             },
             generateId: () => '#' + Math.floor(Math.random() * 90000 + 10000),
@@ -468,55 +473,170 @@
                     timeout = setTimeout(() => func.apply(this, args), wait);
                 };
             },
-            diffDays: (date1, date2) => {
-                const d1 = new Date(date1);
-                const d2 = new Date(date2);
-                return Math.ceil(Math.abs(d1 - d2) / (1000 * 60 * 60 * 24));
-            },
-            isStuckMoreThan3Days: (item) => {
-                const today = new Date();
-                const itemDate = new Date(item.dataCompra);
-                const days = utils.diffDays(today, itemDate);
-                return days > 3 &&
-                       (item.statusNota === 'Aguardando' ||
-                        (item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira')));
-            },
+            diffDays: (timestampA, timestampB) => Math.ceil(Math.abs(timestampA - timestampB) / 86400000),
             matchesStatusKey: (item, key) => {
                 if (key === 'pendente_nota') return item.statusNota === 'Aguardando';
-                // REGRA CORRIGIDA: Pendente conciliação mas que JÁ SAIU da emissão de nota
                 if (key === 'pendente_concil') return item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira');
                 if (key === 'cancelada') return item.statusNota === 'Cancelada';
                 if (key === 'concluida') return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
                 return true;
             },
+            isStuckMoreThan3Days: (item) => {
+                if (!item._dateMs) return false;
+                const days = utils.diffDays(Date.now(), item._dateMs);
+                return days > 3 && (
+                    item.statusNota === 'Aguardando' ||
+                    (item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira'))
+                );
+            },
+            preparePurchase(raw) {
+                const valor = Number(raw?.valor || 0);
+                const dataCompra = String(raw?.dataCompra || '').trim();
+                const dateDisplay = utils.formatDate(dataCompra);
+                const valorDisplay = utils.formatCurrency(valor);
+                const valorFixed = valor.toFixed(2);
+                const valorComma = valorFixed.replace('.', ',');
+                const valorDigits = valorFixed.replace(/\D/g, '');
+                const fornecedor = String(raw?.fornecedor || '');
+                const idVisual = String(raw?.id_visual || '');
+                const itens = String(raw?.itens || raw?.observacao || '');
+                const normalizedBlob = [
+                    fornecedor,
+                    idVisual,
+                    itens,
+                    dateDisplay,
+                    valorDisplay,
+                    valorFixed,
+                    valorComma,
+                    valorDigits
+                ].map(utils.normalizeSearchText).join(' | ');
+                const digitBlob = [idVisual, valorDigits].join('');
+                const dateMs = dataCompra ? new Date(`${dataCompra}T00:00:00`).getTime() : 0;
+
+                return {
+                    ...raw,
+                    valor,
+                    dataCompra,
+                    fornecedor,
+                    itens,
+                    _dateDisplay: dateDisplay,
+                    _valorDisplay: valorDisplay,
+                    _valorFixed: valorFixed,
+                    _valorComma: valorComma,
+                    _valorDigits: valorDigits,
+                    _searchBlob: normalizedBlob,
+                    _searchDigits: digitBlob,
+                    _monthKey: dataCompra ? dataCompra.substring(0, 7) : '',
+                    _dateMs: Number.isFinite(dateMs) ? dateMs : 0
+                };
+            },
+            matchesSearchTerm: (item, term) => {
+                if (!term) return true;
+                const normalizedTerm = utils.normalizeSearchText(term);
+                const digitsTerm = String(term).replace(/\D/g, '');
+                return item._searchBlob.includes(normalizedTerm)
+                    || (digitsTerm && item._searchDigits.includes(digitsTerm));
+            },
             loadFilters: () => {
                 const stored = localStorage.getItem('filtersByStatus');
-                if(stored) {
-                    const loaded = JSON.parse(stored);
-                    Object.keys(state.filtersByStatus).forEach(key => {
-                        state.filtersByStatus[key] = loaded[key] || 'geral';
-                    });
+                if (stored) {
+                    try {
+                        const loaded = JSON.parse(stored);
+                        Object.keys(state.filtersByStatus).forEach(key => {
+                            state.filtersByStatus[key] = loaded[key] || 'geral';
+                        });
+                    } catch (_) {}
                 }
             },
             saveFilters: () => {
                 localStorage.setItem('filtersByStatus', JSON.stringify(state.filtersByStatus));
+            },
+            resetCaches: () => {
+                state.cache.baseKey = null;
+                state.cache.tableKey = null;
+                state.cache.chartKey = null;
+                state.cache.kpiKey = null;
+            },
+            escapeHtml: (value) => String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;'),
+            buildMicroFilterOptions: (selected) => {
+                return ['geral', 'o-que-falta'].map(option => {
+                    const label = option === 'geral' ? 'Geral' : 'Oq.falta';
+                    const isSelected = selected === option ? 'selected' : '';
+                    return `<option value="${option}" ${isSelected}>${label}</option>`;
+                }).join('');
             }
         };
 
-        // Instâncias do Chart.js
         window.chartNotasObj = null;
         window.chartConcilObj = null;
 
-        // ================= UI =================
-        const ui = {
+        const render = {
+            schedule(flags = { kpis: true, charts: true, table: true }) {
+                state.pendingRenderFlags.kpis = state.pendingRenderFlags.kpis || !!flags.kpis;
+                state.pendingRenderFlags.charts = state.pendingRenderFlags.charts || !!flags.charts;
+                state.pendingRenderFlags.table = state.pendingRenderFlags.table || !!flags.table;
+
+                if (state.renderScheduled) return;
+                state.renderScheduled = true;
+
+                requestAnimationFrame(() => {
+                    const nextFlags = { ...state.pendingRenderFlags };
+                    state.pendingRenderFlags = { kpis: false, charts: false, table: false };
+                    state.renderScheduled = false;
+
+                    if (nextFlags.kpis) ui.renderKPIs();
+                    if (nextFlags.charts) ui.renderCharts();
+                    if (nextFlags.table) ui.renderTable();
+                });
+            }
+        };
+
+        const selectors = {
+            init() {
+                dom.companySelector = document.getElementById('company-selector');
+                dom.searchInput = document.getElementById('search-input');
+                dom.filterStatus = document.getElementById('filter-status');
+                dom.filterDateMode = document.getElementById('filter-date-mode');
+                dom.filterMonth = document.getElementById('filter-month');
+                dom.filterCustomDates = document.getElementById('filter-custom-dates');
+                dom.filterStart = document.getElementById('filter-start');
+                dom.filterEnd = document.getElementById('filter-end');
+                dom.inpValor = document.getElementById('inp-valor');
+                dom.purchaseForm = document.getElementById('purchase-form');
+                dom.tableBody = document.getElementById('table-body');
+                dom.emptyState = document.getElementById('empty-state');
+                dom.kpiContainer = document.getElementById('kpi-container');
+                dom.toastContainer = document.getElementById('toast-container');
+                dom.stuckBadge = document.getElementById('stuckBadge');
+                dom.badgeNota = document.getElementById('badge-nota');
+                dom.badgeConcil = document.getElementById('badge-concil');
+                dom.pageWrap = document.getElementById('table-pagination');
+                dom.pageRange = document.getElementById('table-range');
+                dom.pageIndicator = document.getElementById('page-indicator');
+                dom.pagePrev = document.getElementById('page-prev');
+                dom.pageNext = document.getElementById('page-next');
+                dom.pageSize = document.getElementById('page-size');
+                dom.chartNotas = document.getElementById('chart-notas').getContext('2d');
+                dom.chartConcil = document.getElementById('chart-concil').getContext('2d');
+            }
+        };
+
+        const ui = window.ui = {
             showToast: (msg, type = 'success') => {
-                const container = document.getElementById('toast-container');
                 const el = document.createElement('div');
                 const colors = type === 'success' ? 'bg-emerald-600' : (type === 'error' ? 'bg-red-500' : 'bg-blue-600');
                 el.className = `${colors} text-white px-4 py-3 rounded-lg shadow-xl flex items-center gap-3 fade-in text-sm font-bold min-w-[320px] mb-2`;
-                el.innerHTML = `<i class="fa-solid fa-${type === 'success' ? 'check-circle' : 'info-circle'}"></i> <span>${msg}</span>`;
-                container.appendChild(el);
-                setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3500);
+                el.innerHTML = `<i class="fa-solid fa-${type === 'success' ? 'check-circle' : 'info-circle'}"></i> <span>${utils.escapeHtml(msg)}</span>`;
+                dom.toastContainer.appendChild(el);
+                setTimeout(() => {
+                    el.style.opacity = '0';
+                    setTimeout(() => el.remove(), 300);
+                }, 3500);
             },
 
             openModal: (mode, id = null) => {
@@ -540,14 +660,13 @@
                     document.getElementById('inp-data').value = new Date().toISOString().split('T')[0];
                     document.getElementById('inp-status-nota').value = 'Aguardando';
                     document.getElementById('inp-status-concil').value = 'Pendente';
-
                     empresaSelect.value = state.currentCompany;
                     empresaSelect.disabled = false;
                     btnDelete.classList.add('hidden');
                 } else {
                     title.innerText = 'Editar Lançamento';
                     const item = state.purchases.find(p => p.id === id);
-                    if(item) {
+                    if (item) {
                         document.getElementById('edit-id').value = item.id;
                         document.getElementById('inp-data').value = item.dataCompra;
                         document.getElementById('inp-fornecedor').value = item.fornecedor;
@@ -555,10 +674,8 @@
                         document.getElementById('inp-itens').value = item.itens || item.observacao || '';
                         document.getElementById('inp-status-nota').value = item.statusNota || item.notaFiscal;
                         document.getElementById('inp-status-concil').value = item.statusConcil || item.conciliacao;
-                        
                         empresaSelect.value = item.empresa || state.currentCompany;
                         empresaSelect.disabled = true;
-
                         btnDelete.classList.remove('hidden');
                         btnDelete.setAttribute('data-id', id);
                     }
@@ -574,28 +691,13 @@
             },
 
             renderKPIs: () => {
-                // Obter dados bases considerando Data e Empresa (para os cards e badge acompanharem os filtros de data)
                 const baseData = app.getBaseData();
-                state.stuckCounts = { pendenteNota: 0, pendenteConcil: 0 };
-
-                baseData.forEach(p => {
-                    if (utils.isStuckMoreThan3Days(p)) {
-                        if (p.statusNota === 'Aguardando') state.stuckCounts.pendenteNota++;
-                        else if (p.statusConcil === 'Pendente' && (p.statusNota === 'Emitida' || p.statusNota === 'NaoEmitira')) state.stuckCounts.pendenteConcil++;
-                    }
-                });
-
-                const badge = document.getElementById('stuckBadge');
-                document.getElementById('badge-nota').textContent = state.stuckCounts.pendenteNota;
-                document.getElementById('badge-concil').textContent = state.stuckCounts.pendenteConcil;
-
-                if (Object.values(state.stuckCounts).some(count => count > 0)) {
-                    badge.classList.remove('hidden');
-                } else {
-                    badge.classList.add('hidden');
-                }
-
                 const stats = app.getFilteredStats(baseData);
+                state.stuckCounts = stats.stuckCounts;
+
+                dom.badgeNota.textContent = state.stuckCounts.pendenteNota;
+                dom.badgeConcil.textContent = state.stuckCounts.pendenteConcil;
+                dom.stuckBadge.classList.toggle('hidden', !(state.stuckCounts.pendenteNota > 0 || state.stuckCounts.pendenteConcil > 0));
 
                 const statusConfig = [
                     { key: 'pendente_nota', title: '1. Pendente Nota', color: 'yellow', icon: 'fa-file-invoice', count: stats.pendenteNota },
@@ -604,15 +706,14 @@
                     { key: 'concluida', title: '4. Histórico', color: 'purple', icon: 'fa-clock-rotate-left', count: stats.historico }
                 ];
 
-                const kpiHTML = (config) => `
-                    <div onclick="app.filterByKPI('${config.key}')" class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-${config.color}-300 transition cursor-pointer group relative overflow-hidden">
+                dom.kpiContainer.innerHTML = statusConfig.map(config => `
+                    <div data-kpi-key="${config.key}" class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-${config.color}-300 transition cursor-pointer group relative overflow-hidden">
                         <div class="flex justify-between items-start z-10 relative">
                             <div>
                                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center">
                                     ${config.title}
-                                    <select class="status-microfilter" data-status="${config.key}" onclick="event.stopPropagation()" onchange="app.setStatusFilter('${config.key}', this.value)">
-                                        <option value="geral">Geral</option>
-                                        <option value="o-que-falta">Oq.falta</option>
+                                    <select class="status-microfilter" data-status="${config.key}">
+                                        ${utils.buildMicroFilterOptions(state.filtersByStatus[config.key])}
                                     </select>
                                 </p>
                                 <h3 class="text-3xl font-bold text-slate-700 group-hover:text-${config.color}-600 transition">${config.count}</h3>
@@ -623,320 +724,516 @@
                         </div>
                         <div class="absolute bottom-0 left-0 w-full h-1 bg-${config.color}-500 transform scale-x-0 group-hover:scale-x-100 transition duration-300"></div>
                     </div>
-                `;
-
-                document.getElementById('kpi-container').innerHTML = statusConfig.map(kpiHTML).join('');
-
-                statusConfig.forEach(config => {
-                    const select = document.querySelector(`[data-status="${config.key}"]`);
-                    if(select) select.value = state.filtersByStatus[config.key];
-                });
+                `).join('');
             },
 
             renderCharts: () => {
-                const baseData = app.getBaseData();
-                let chartBaseData = [...baseData];
+                const chartData = app.getChartData();
+                const labels = chartData.labels;
+                const notas = chartData.notas;
+                const concil = chartData.concil;
 
-                if (state.filter.mode === 'stuck') {
-                    chartBaseData = chartBaseData.filter(item => utils.isStuckMoreThan3Days(item));
+                if (!window.chartNotasObj) {
+                    window.chartNotasObj = new Chart(dom.chartNotas, {
+                        type: 'bar',
+                        data: {
+                            labels,
+                            datasets: [{
+                                data: notas,
+                                backgroundColor: '#fde047',
+                                borderColor: '#eab308',
+                                borderWidth: 1,
+                                borderRadius: 4,
+                                barPercentage: 0.6
+                            }]
+                        },
+                        options: app.getChartOptions()
+                    });
                 } else {
-                    const activeKey = state.filter.kpiFilter || state.filter.status;
-                    if (activeKey && activeKey !== 'all') {
-                        chartBaseData = chartBaseData.filter(item => utils.matchesStatusKey(item, activeKey));
-                    }
+                    window.chartNotasObj.data.labels = labels;
+                    window.chartNotasObj.data.datasets[0].data = notas;
+                    window.chartNotasObj.update('none');
                 }
 
-                const notasData = app.getDataForStatusCard(chartBaseData, 'pendente_nota');
-                const concilData = app.getDataForStatusCard(chartBaseData, 'pendente_concil');
-                const mapNotas = {};
-                const mapConcil = {};
-
-                notasData.forEach(item => {
-                    if (!item.dataCompra) return;
-                    const monthYear = item.dataCompra.substring(0, 7);
-                    if (!mapNotas[monthYear]) mapNotas[monthYear] = 0;
-                    mapNotas[monthYear]++;
-                });
-
-                concilData.forEach(item => {
-                    if (!item.dataCompra) return;
-                    const monthYear = item.dataCompra.substring(0, 7);
-                    if (!mapConcil[monthYear]) mapConcil[monthYear] = 0;
-                    mapConcil[monthYear]++;
-                });
-
-                // Ordenar labels cronologicamente
-                const allLabels = Array.from(new Set([...Object.keys(mapNotas), ...Object.keys(mapConcil)])).sort();
-                
-                const displayLabels = allLabels.map(lbl => {
-                    const [y, m] = lbl.split('-');
-                    return `${m}/${y}`;
-                });
-
-                const dataNotas = allLabels.map(l => mapNotas[l] || 0);
-                const dataConcil = allLabels.map(l => mapConcil[l] || 0);
-
-                // Configuração comum para gráficos minimalistas
-                const commonOptions = {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: { grid: { display: false } },
-                        y: { beginAtZero: true, ticks: { stepSize: 1 }, grid: { borderDash: [4, 4], color: '#f1f5f9' } }
-                    }
-                };
-
-                // Gráfico 1: Notas
-                if (window.chartNotasObj) window.chartNotasObj.destroy();
-                window.chartNotasObj = new Chart(document.getElementById('chart-notas').getContext('2d'), {
-                    type: 'bar',
-                    data: {
-                        labels: displayLabels,
-                        datasets: [{ data: dataNotas, backgroundColor: '#fde047', borderColor: '#eab308', borderWidth: 1, borderRadius: 4, barPercentage: 0.6 }]
-                    },
-                    options: commonOptions
-                });
-
-                // Gráfico 2: Conciliação
-                if (window.chartConcilObj) window.chartConcilObj.destroy();
-                window.chartConcilObj = new Chart(document.getElementById('chart-concil').getContext('2d'), {
-                    type: 'bar',
-                    data: {
-                        labels: displayLabels,
-                        datasets: [{ data: dataConcil, backgroundColor: '#93c5fd', borderColor: '#3b82f6', borderWidth: 1, borderRadius: 4, barPercentage: 0.6 }]
-                    },
-                    options: commonOptions
-                });
+                if (!window.chartConcilObj) {
+                    window.chartConcilObj = new Chart(dom.chartConcil, {
+                        type: 'bar',
+                        data: {
+                            labels,
+                            datasets: [{
+                                data: concil,
+                                backgroundColor: '#93c5fd',
+                                borderColor: '#3b82f6',
+                                borderWidth: 1,
+                                borderRadius: 4,
+                                barPercentage: 0.6
+                            }]
+                        },
+                        options: app.getChartOptions()
+                    });
+                } else {
+                    window.chartConcilObj.data.labels = labels;
+                    window.chartConcilObj.data.datasets[0].data = concil;
+                    window.chartConcilObj.update('none');
+                }
             },
 
             renderTable: () => {
-                const tbody = document.getElementById('table-body');
-                tbody.innerHTML = '';
+                const tableData = app.getTableData();
+                const total = tableData.length;
+                const totalPages = Math.max(1, Math.ceil(total / state.table.pageSize));
+                state.table.page = Math.min(state.table.page, totalPages);
+                const startIndex = total === 0 ? 0 : (state.table.page - 1) * state.table.pageSize;
+                const endIndex = Math.min(startIndex + state.table.pageSize, total);
+                const pageItems = tableData.slice(startIndex, endIndex);
 
-                // Obtém base (já filtrada por empresa e datas)
-                let filtered = app.getBaseData();
+                dom.emptyState.classList.toggle('hidden', total !== 0);
+                dom.pageWrap.classList.toggle('hidden', total === 0);
 
-                // Aplica Filtros de Texto e Status Específico da Tabela
-                filtered = filtered.filter(item => {
-                    const term = state.filter.search || '';
-                    const matchSearch = utils.matchesSearchTerm(item, term);
-
-                    if(state.filter.mode === 'stuck') {
-                        return utils.isStuckMoreThan3Days(item) && matchSearch;
-                    }
-
-                    let matchStatus = true;
-                    const filterKey = state.filter.kpiFilter || state.filter.status;
-                    if(filterKey !== 'all') {
-                        matchStatus = utils.matchesStatusKey(item, filterKey);
-                    }
-
-                    return matchSearch && matchStatus;
-                });
-
-                filtered.sort((a,b) => new Date(b.dataCompra) - new Date(a.dataCompra));
-
-                if(filtered.length === 0) {
-                    document.getElementById('empty-state').classList.remove('hidden');
+                if (total === 0) {
+                    dom.tableBody.innerHTML = '';
                     return;
                 }
-                document.getElementById('empty-state').classList.add('hidden');
 
-                filtered.forEach(item => {
+                dom.pageRange.textContent = `Exibindo ${startIndex + 1}-${endIndex} de ${total}`;
+                dom.pageIndicator.textContent = `Página ${state.table.page} de ${totalPages}`;
+                dom.pagePrev.disabled = state.table.page <= 1;
+                dom.pageNext.disabled = state.table.page >= totalPages;
+
+                const rowsHtml = pageItems.map(item => {
                     const badgeNota = {
-                        'Aguardando': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Aguardando</span>',
-                        'Emitida': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">Emitida</span>',
-                        'NaoEmitira': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 line-through">Não Emitirá</span>',
-                        'Cancelada': '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200">Cancelada</span>'
+                        Aguardando: '<span class="px-2 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-700 border border-yellow-200">Aguardando</span>',
+                        Emitida: '<span class="px-2 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">Emitida</span>',
+                        NaoEmitira: '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 line-through">Não Emitirá</span>',
+                        Cancelada: '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200">Cancelada</span>'
                     }[item.statusNota] || '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">-</span>';
 
-                    let concilIcon = item.statusConcil === 'Concluída'
+                    const concilIcon = item.statusConcil === 'Concluída'
                         ? '<i class="fa-solid fa-circle-check text-emerald-500 text-lg"></i>'
                         : '<div class="w-3 h-3 rounded-full bg-slate-200 border border-slate-300 mx-auto" title="Pendente"></div>';
 
                     const isStuck = utils.isStuckMoreThan3Days(item);
                     const rowClass = isStuck ? 'bg-red-50/50 hover:bg-red-50' : 'bg-white hover:bg-slate-50';
 
-                    const row = `
+                    return `
                         <tr class="${rowClass} transition border-b border-slate-100 group">
                             <td class="px-6 py-4">
-                                <div class="font-bold text-slate-700">${utils.formatDate(item.dataCompra)}</div>
-                                <div class="text-[11px] text-slate-400 font-mono">${item.id_visual || '-'}</div>
+                                <div class="font-bold text-slate-700">${utils.escapeHtml(item._dateDisplay)}</div>
+                                <div class="text-[11px] text-slate-400 font-mono">${utils.escapeHtml(item.id_visual || '-')}</div>
                             </td>
                             <td class="px-6 py-4">
-                                <div class="font-bold text-slate-700 text-sm">${item.fornecedor || '-'}</div>
+                                <div class="font-bold text-slate-700 text-sm">${utils.escapeHtml(item.fornecedor || '-')}</div>
                             </td>
                             <td class="px-6 py-4">
-                                <div class="text-xs text-slate-500">${item.itens || '-'}</div>
+                                <div class="text-xs text-slate-500">${utils.escapeHtml(item.itens || '-')}</div>
                             </td>
-                            <td class="px-6 py-4 font-bold text-slate-700">${utils.formatCurrency(item.valor || 0)}</td>
+                            <td class="px-6 py-4 font-bold text-slate-700">${utils.escapeHtml(item._valorDisplay)}</td>
                             <td class="px-6 py-4 text-center">${badgeNota}</td>
                             <td class="px-6 py-4 text-center">${concilIcon}</td>
                             <td class="px-6 py-4 text-right">
-                                <button onclick="ui.openModal('edit', '${item.id}')" class="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition">
+                                <button data-edit-id="${utils.escapeHtml(item.id)}" class="text-blue-600 hover:text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition">
                                     <i class="fa-solid fa-pen-to-square"></i>
                                 </button>
                             </td>
                         </tr>
                     `;
-                    tbody.innerHTML += row;
-                });
+                }).join('');
+
+                dom.tableBody.innerHTML = rowsHtml;
             }
         };
 
-        // ================= APP =================
-        const app = {
-            init: () => {
+        const app = window.app = {
+            init() {
+                selectors.init();
                 utils.loadFilters();
-                
+                app.bindEvents();
+
                 window.addEventListener('malutdb-ready', () => {
                     ui.showToast('Conectado ao Banco de Dados!', 'success');
-                    window.MalutDB.subscribeCompras((lista) => {
-                        state.purchases = lista;
-                        app.updateAllViews();
-                    }, (err) => {
-                        ui.showToast('Erro Realtime: ' + err.code, 'error');
-                    });
+                    app.subscribeToCompany(state.currentCompany);
                 });
 
-                // Listeners UI Gerais
-                document.getElementById('company-selector').addEventListener('change', (e) => {
-                    state.currentCompany = e.target.value;
-                    state.filter.kpiFilter = null;
-                    state.filter.status = 'all';
-                    state.filter.mode = 'normal';
-                    document.getElementById('filter-status').value = 'all';
-                    app.updateAllViews();
-                });
-
-                document.getElementById('search-input').addEventListener('input', utils.debounce((e) => {
-                    state.filter.search = e.target.value;
-                    ui.renderTable(); // Busca não afeta KPIs nem Gráficos
-                }, 300));
-
-                document.getElementById('filter-status').addEventListener('change', (e) => {
-                    state.filter.status = e.target.value;
-                    state.filter.kpiFilter = null;
-                    state.filter.mode = 'normal';
-                    ui.renderCharts();
-                    ui.renderTable();
-                });
-
-                // Listeners de Data (Afetam TODOS as visualizações)
-                document.getElementById('filter-date-mode').addEventListener('change', (e) => {
-                    state.filter.dateMode = e.target.value;
-                    document.getElementById('filter-month').classList.toggle('hidden', state.filter.dateMode !== 'month');
-                    document.getElementById('filter-custom-dates').classList.toggle('hidden', state.filter.dateMode !== 'custom');
-                    app.updateAllViews();
-                });
-
-                document.getElementById('filter-month').addEventListener('change', (e) => {
-                    state.filter.dateMonth = e.target.value;
-                    app.updateAllViews();
-                });
-                document.getElementById('filter-start').addEventListener('change', (e) => {
-                    state.filter.dateStart = e.target.value;
-                    app.updateAllViews();
-                });
-                document.getElementById('filter-end').addEventListener('change', (e) => {
-                    state.filter.dateEnd = e.target.value;
-                    app.updateAllViews();
-                });
-
-                document.getElementById('inp-valor').addEventListener('input', (e) => {
-                    e.target.value = moneyMask.format(e.target.value);
-                });
-
-                // Salvar
-                document.getElementById('purchase-form').addEventListener('submit', async (e) => {
-                    e.preventDefault();
-                    
-                    const submitBtn = document.getElementById('btn-submit');
-                    if(submitBtn.disabled) return; 
-
-                    const editId = document.getElementById('edit-id').value;
-                    const item = editId ? state.purchases.find(p => p.id === editId) : null;
-                    const statusOrder = { 'Aguardando': 1, 'Emitida': 2, 'NaoEmitira': 3, 'Cancelada': 4, 'Pendente': 1, 'Sim': 2, 'Não': 3, 'Concluída': 4 };
-
-                    if(item) {
-                        const notaNew = document.getElementById('inp-status-nota').value;
-                        const concilNew = document.getElementById('inp-status-concil').value;
-                        if(statusOrder[notaNew] < statusOrder[item.statusNota] ||
-                           statusOrder[concilNew] < statusOrder[item.statusConcil]) {
-                            if(prompt("Senha retrocesso:") !== "1896") {
-                                ui.showToast('Operação cancelada.', 'error');
-                                return;
-                            }
-                        }
-                    }
-
-                    submitBtn.disabled = true;
-                    submitBtn.classList.add('opacity-70', 'cursor-not-allowed');
-                    const originalBtnContent = submitBtn.innerHTML;
-                    submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Salvando...</span>';
-
-                    const payload = {
-                        dataCompra: document.getElementById('inp-data').value,
-                        fornecedor: document.getElementById('inp-fornecedor').value,
-                        valor: moneyMask.unformat(document.getElementById('inp-valor').value),
-                        itens: document.getElementById('inp-itens').value,
-                        statusNota: document.getElementById('inp-status-nota').value,
-                        statusConcil: document.getElementById('inp-status-concil').value
-                    };
-
-                    try {
-                        if (editId) {
-                            await window.MalutDB.atualizarCompra(editId, payload);
-                            ui.showToast('Atualizado!');
-                        } else {
-                            const empresaSelecionada = document.getElementById('inp-empresa').value;
-                            if(!empresaSelecionada) throw new Error('Selecione a empresa!');
-                            payload.empresa = empresaSelecionada;
-                            payload.id_visual = utils.generateId();
-                            
-                            await window.MalutDB.criarCompra(payload);
-                            ui.showToast('Salvo!');
-                        }
-                        ui.closeModal();
-                    } catch(err) {
-                        ui.showToast('Erro ao salvar: ' + err.message, 'error');
-                    } finally {
-                        submitBtn.disabled = false;
-                        submitBtn.classList.remove('opacity-70', 'cursor-not-allowed');
-                        submitBtn.innerHTML = originalBtnContent;
-                    }
+                window.addEventListener('malutdb-error', (event) => {
+                    ui.showToast(`Falha na conexão: ${event.detail || 'erro desconhecido'}`, 'error');
                 });
             },
 
-            // Função que filtra globalmente os dados para TODAS as visões baseadas na DATA e EMPRESA
-            getBaseData: () => {
-                return state.purchases.filter(item => {
-                    if (item.empresa !== state.currentCompany) return false;
+            bindEvents() {
+                dom.companySelector.addEventListener('change', (e) => {
+                    const nextCompany = e.target.value;
+                    if (nextCompany === state.currentCompany) return;
+                    state.currentCompany = nextCompany;
+                    state.filter.kpiFilter = null;
+                    state.filter.status = 'all';
+                    state.filter.mode = 'normal';
+                    state.table.page = 1;
+                    dom.filterStatus.value = 'all';
+                    app.subscribeToCompany(nextCompany);
+                });
 
+                dom.searchInput.addEventListener('input', utils.debounce((e) => {
+                    state.filter.search = e.target.value;
+                    state.table.page = 1;
+                    state.cache.tableKey = null;
+                    render.schedule({ table: true });
+                }, 250));
+
+                dom.filterStatus.addEventListener('change', (e) => {
+                    state.filter.status = e.target.value;
+                    state.filter.kpiFilter = null;
+                    state.filter.mode = 'normal';
+                    state.table.page = 1;
+                    state.cache.tableKey = null;
+                    state.cache.chartKey = null;
+                    render.schedule({ charts: true, table: true });
+                });
+
+                dom.filterDateMode.addEventListener('change', (e) => {
+                    state.filter.dateMode = e.target.value;
+                    dom.filterMonth.classList.toggle('hidden', state.filter.dateMode !== 'month');
+                    dom.filterCustomDates.classList.toggle('hidden', state.filter.dateMode !== 'custom');
+                    state.table.page = 1;
+                    utils.resetCaches();
+                    render.schedule({ kpis: true, charts: true, table: true });
+                });
+
+                dom.filterMonth.addEventListener('change', (e) => {
+                    state.filter.dateMonth = e.target.value;
+                    state.table.page = 1;
+                    utils.resetCaches();
+                    render.schedule({ kpis: true, charts: true, table: true });
+                });
+
+                dom.filterStart.addEventListener('change', (e) => {
+                    state.filter.dateStart = e.target.value;
+                    state.table.page = 1;
+                    utils.resetCaches();
+                    render.schedule({ kpis: true, charts: true, table: true });
+                });
+
+                dom.filterEnd.addEventListener('change', (e) => {
+                    state.filter.dateEnd = e.target.value;
+                    state.table.page = 1;
+                    utils.resetCaches();
+                    render.schedule({ kpis: true, charts: true, table: true });
+                });
+
+                dom.inpValor.addEventListener('input', (e) => {
+                    e.target.value = moneyMask.format(e.target.value);
+                });
+
+                dom.purchaseForm.addEventListener('submit', app.handleSubmit);
+
+                dom.kpiContainer.addEventListener('change', (e) => {
+                    if (!e.target.matches('.status-microfilter')) return;
+                    e.stopPropagation();
+                    const statusKey = e.target.dataset.status;
+                    app.setStatusFilter(statusKey, e.target.value);
+                });
+
+                dom.kpiContainer.addEventListener('click', (e) => {
+                    const card = e.target.closest('[data-kpi-key]');
+                    if (!card) return;
+                    if (e.target.closest('.status-microfilter')) return;
+                    app.filterByKPI(card.dataset.kpiKey);
+                });
+
+                dom.tableBody.addEventListener('click', (e) => {
+                    const btn = e.target.closest('[data-edit-id]');
+                    if (!btn) return;
+                    ui.openModal('edit', btn.dataset.editId);
+                });
+
+                dom.pagePrev.addEventListener('click', () => {
+                    if (state.table.page <= 1) return;
+                    state.table.page -= 1;
+                    render.schedule({ table: true });
+                });
+
+                dom.pageNext.addEventListener('click', () => {
+                    state.table.page += 1;
+                    render.schedule({ table: true });
+                });
+
+                dom.pageSize.addEventListener('change', (e) => {
+                    state.table.pageSize = Number(e.target.value) || 100;
+                    state.table.page = 1;
+                    render.schedule({ table: true });
+                });
+            },
+
+            async handleSubmit(e) {
+                e.preventDefault();
+                const submitBtn = document.getElementById('btn-submit');
+                if (submitBtn.disabled) return;
+
+                const editId = document.getElementById('edit-id').value;
+                const item = editId ? state.purchases.find(p => p.id === editId) : null;
+                const statusOrder = { Aguardando: 1, Emitida: 2, NaoEmitira: 3, Cancelada: 4, Pendente: 1, Sim: 2, 'Não': 3, Concluída: 4 };
+
+                if (item) {
+                    const notaNew = document.getElementById('inp-status-nota').value;
+                    const concilNew = document.getElementById('inp-status-concil').value;
+                    if (statusOrder[notaNew] < statusOrder[item.statusNota] || statusOrder[concilNew] < statusOrder[item.statusConcil]) {
+                        if (prompt('Senha retrocesso:') !== '1896') {
+                            ui.showToast('Operação cancelada.', 'error');
+                            return;
+                        }
+                    }
+                }
+
+                submitBtn.disabled = true;
+                submitBtn.classList.add('opacity-70', 'cursor-not-allowed');
+                const originalBtnContent = submitBtn.innerHTML;
+                submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>Salvando...</span>';
+
+                const payload = {
+                    dataCompra: document.getElementById('inp-data').value,
+                    fornecedor: document.getElementById('inp-fornecedor').value,
+                    valor: moneyMask.unformat(document.getElementById('inp-valor').value),
+                    itens: document.getElementById('inp-itens').value,
+                    statusNota: document.getElementById('inp-status-nota').value,
+                    statusConcil: document.getElementById('inp-status-concil').value
+                };
+
+                try {
+                    if (editId) {
+                        await window.MalutDB.atualizarCompra(editId, payload);
+                        ui.showToast('Atualizado!');
+                    } else {
+                        const empresaSelecionada = document.getElementById('inp-empresa').value;
+                        if (!empresaSelecionada) throw new Error('Selecione a empresa!');
+                        payload.empresa = empresaSelecionada;
+                        payload.id_visual = utils.generateId();
+                        await window.MalutDB.criarCompra(payload);
+                        ui.showToast('Salvo!');
+                    }
+                    ui.closeModal();
+                } catch (err) {
+                    ui.showToast('Erro ao salvar: ' + err.message, 'error');
+                } finally {
+                    submitBtn.disabled = false;
+                    submitBtn.classList.remove('opacity-70', 'cursor-not-allowed');
+                    submitBtn.innerHTML = originalBtnContent;
+                }
+            },
+
+            subscribeToCompany(company) {
+                if (typeof state.unsubscribeCompras === 'function') {
+                    state.unsubscribeCompras();
+                    state.unsubscribeCompras = null;
+                }
+
+                state.purchasesMap.clear();
+                state.purchases = [];
+                state.purchasesVersion += 1;
+                state.table.page = 1;
+                utils.resetCaches();
+                render.schedule({ kpis: true, charts: true, table: true });
+
+                state.unsubscribeCompras = window.MalutDB.subscribeCompras(company, (snap) => {
+                    const isInitial = state.purchasesMap.size === 0 && snap.metadata.fromCache === false && snap.docChanges().length === snap.size;
+                    snap.docChanges().forEach(change => {
+                        const id = change.doc.id;
+                        if (change.type === 'removed') {
+                            state.purchasesMap.delete(id);
+                            return;
+                        }
+                        state.purchasesMap.set(id, utils.preparePurchase({ id, ...change.doc.data() }));
+                    });
+
+                    state.purchases = Array.from(state.purchasesMap.values()).sort((a, b) => (b._dateMs || 0) - (a._dateMs || 0));
+                    state.purchasesVersion += 1;
+                    state.table.page = 1;
+                    utils.resetCaches();
+                    render.schedule({ kpis: true, charts: true, table: true });
+
+                    if (isInitial && snap.size > 250) {
+                        ui.showToast(`Base carregada: ${snap.size} registros nesta empresa.`, 'info');
+                    }
+                }, (err) => {
+                    ui.showToast('Erro Realtime: ' + (err.code || err.message || 'desconhecido'), 'error');
+                });
+            },
+
+            getBaseData() {
+                const key = [
+                    state.purchasesVersion,
+                    state.currentCompany,
+                    state.filter.dateMode,
+                    state.filter.dateMonth,
+                    state.filter.dateStart,
+                    state.filter.dateEnd
+                ].join('|');
+
+                if (state.cache.baseKey === key) return state.cache.baseData;
+
+                const filtered = state.purchases.filter(item => {
                     if (state.filter.dateMode === 'month' && state.filter.dateMonth) {
-                        const itemMonth = (item.dataCompra || '').substring(0, 7);
-                        if (itemMonth !== state.filter.dateMonth) return false;
-                    } else if (state.filter.dateMode === 'custom') {
+                        return item._monthKey === state.filter.dateMonth;
+                    }
+                    if (state.filter.dateMode === 'custom') {
                         const d = item.dataCompra;
                         if (state.filter.dateStart && d < state.filter.dateStart) return false;
                         if (state.filter.dateEnd && d > state.filter.dateEnd) return false;
                     }
                     return true;
                 });
+
+                state.cache.baseKey = key;
+                state.cache.baseData = filtered;
+                return filtered;
             },
 
-            updateAllViews: () => {
-                ui.renderKPIs();
-                ui.renderCharts();
-                ui.renderTable();
+            getDataForStatusCard(baseData, statusKey) {
+                const microFilter = state.filtersByStatus[statusKey] || 'geral';
+                return baseData.filter(item => {
+                    if (!utils.matchesStatusKey(item, statusKey)) return false;
+                    if (microFilter === 'o-que-falta') {
+                        if (statusKey === 'pendente_nota') return item.statusNota === 'Aguardando';
+                        if (statusKey === 'pendente_concil') return item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira');
+                        if (statusKey === 'cancelada') return item.statusNota === 'Cancelada';
+                        if (statusKey === 'concluida') return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
+                    }
+                    return true;
+                });
             },
 
-            toggleStickyPanel: () => {
+            getFilteredStats(baseData) {
+                const key = [
+                    state.cache.baseKey,
+                    state.filtersByStatus.pendente_nota,
+                    state.filtersByStatus.pendente_concil,
+                    state.filtersByStatus.cancelada,
+                    state.filtersByStatus.concluida
+                ].join('|');
+
+                if (state.cache.kpiKey === key) return state.cache.kpiData;
+
+                const stats = {
+                    pendenteNota: app.getDataForStatusCard(baseData, 'pendente_nota').length,
+                    pendenteConcil: app.getDataForStatusCard(baseData, 'pendente_concil').length,
+                    canceladas: app.getDataForStatusCard(baseData, 'cancelada').length,
+                    historico: app.getDataForStatusCard(baseData, 'concluida').length,
+                    stuckCounts: { pendenteNota: 0, pendenteConcil: 0 }
+                };
+
+                for (const item of baseData) {
+                    if (!utils.isStuckMoreThan3Days(item)) continue;
+                    if (item.statusNota === 'Aguardando') stats.stuckCounts.pendenteNota += 1;
+                    else if (item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira')) stats.stuckCounts.pendenteConcil += 1;
+                }
+
+                state.cache.kpiKey = key;
+                state.cache.kpiData = stats;
+                return stats;
+            },
+
+            getChartData() {
+                const key = [
+                    state.cache.baseKey,
+                    state.filter.mode,
+                    state.filter.kpiFilter,
+                    state.filter.status,
+                    state.filtersByStatus.pendente_nota,
+                    state.filtersByStatus.pendente_concil
+                ].join('|');
+
+                if (state.cache.chartKey === key) return state.cache.chartData;
+
+                const baseData = app.getBaseData();
+                let chartBaseData = baseData;
+
+                if (state.filter.mode === 'stuck') {
+                    chartBaseData = baseData.filter(item => utils.isStuckMoreThan3Days(item));
+                } else {
+                    const activeKey = state.filter.kpiFilter || state.filter.status;
+                    if (activeKey && activeKey !== 'all') {
+                        chartBaseData = baseData.filter(item => utils.matchesStatusKey(item, activeKey));
+                    }
+                }
+
+                const notasData = app.getDataForStatusCard(chartBaseData, 'pendente_nota');
+                const concilData = app.getDataForStatusCard(chartBaseData, 'pendente_concil');
+                const mapNotas = new Map();
+                const mapConcil = new Map();
+
+                notasData.forEach(item => {
+                    if (!item._monthKey) return;
+                    mapNotas.set(item._monthKey, (mapNotas.get(item._monthKey) || 0) + 1);
+                });
+
+                concilData.forEach(item => {
+                    if (!item._monthKey) return;
+                    mapConcil.set(item._monthKey, (mapConcil.get(item._monthKey) || 0) + 1);
+                });
+
+                const allLabels = Array.from(new Set([...mapNotas.keys(), ...mapConcil.keys()])).sort();
+                const chartData = {
+                    labels: allLabels.map(lbl => {
+                        const [y, m] = lbl.split('-');
+                        return `${m}/${y}`;
+                    }),
+                    notas: allLabels.map(label => mapNotas.get(label) || 0),
+                    concil: allLabels.map(label => mapConcil.get(label) || 0)
+                };
+
+                state.cache.chartKey = key;
+                state.cache.chartData = chartData;
+                return chartData;
+            },
+
+            getTableData() {
+                const key = [
+                    state.cache.baseKey,
+                    state.filter.search,
+                    state.filter.status,
+                    state.filter.kpiFilter,
+                    state.filter.mode
+                ].join('|');
+
+                if (state.cache.tableKey === key) return state.cache.tableData;
+
+                const baseData = app.getBaseData();
+                const filterKey = state.filter.kpiFilter || state.filter.status;
+                const term = state.filter.search || '';
+                const filtered = baseData.filter(item => {
+                    if (state.filter.mode === 'stuck' && !utils.isStuckMoreThan3Days(item)) return false;
+                    if (state.filter.mode !== 'stuck' && filterKey !== 'all' && !utils.matchesStatusKey(item, filterKey)) return false;
+                    return utils.matchesSearchTerm(item, term);
+                });
+
+                state.cache.tableKey = key;
+                state.cache.tableData = filtered;
+                return filtered;
+            },
+
+            getChartOptions() {
+                return {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false } },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { stepSize: 1 },
+                            grid: { borderDash: [4, 4], color: '#f1f5f9' }
+                        }
+                    }
+                };
+            },
+
+            updateAllViews() {
+                render.schedule({ kpis: true, charts: true, table: true });
+            },
+
+            toggleStickyPanel() {
                 state.isSticky = !state.isSticky;
                 const panel = document.getElementById('top-panel');
                 const btn = document.getElementById('btn-sticky');
-
                 if (state.isSticky) {
                     panel.classList.add('sticky', 'top-0', '-mx-4', 'px-4', 'md:-mx-6', 'md:px-6', 'pt-4', 'md:pt-6', 'pb-4', 'bg-[#f1f5f9]', 'border-b', 'border-slate-200', 'shadow-sm', '-mt-4', 'md:-mt-6');
                     btn.classList.add('text-blue-600', 'bg-blue-50');
@@ -950,87 +1247,64 @@
                 }
             },
 
-            setStatusFilter: (statusKey, filterValue) => {
+            setStatusFilter(statusKey, filterValue) {
                 state.filtersByStatus[statusKey] = filterValue;
                 state.filter.mode = 'normal';
+                state.table.page = 1;
                 utils.saveFilters();
-                app.updateAllViews();
+                state.cache.kpiKey = null;
+                state.cache.chartKey = null;
+                state.cache.tableKey = null;
+                render.schedule({ kpis: true, charts: true, table: true });
             },
 
-            getDataForStatusCard: (baseData, statusKey) => {
-                const microFilter = state.filtersByStatus[statusKey] || 'geral';
-
-                return baseData.filter(item => {
-                    if (!utils.matchesStatusKey(item, statusKey)) return false;
-
-                    if (microFilter === 'o-que-falta') {
-                        if (statusKey === 'pendente_nota') {
-                            return item.statusNota === 'Aguardando';
-                        }
-                        if (statusKey === 'pendente_concil') {
-                            return item.statusConcil === 'Pendente' && (item.statusNota === 'Emitida' || item.statusNota === 'NaoEmitira');
-                        }
-                        if (statusKey === 'cancelada') {
-                            return item.statusNota === 'Cancelada';
-                        }
-                        if (statusKey === 'concluida') {
-                            return item.statusConcil === 'Concluída' || item.statusNota === 'NaoEmitira';
-                        }
-                    }
-
-                    return true;
-                });
-            },
-
-            getFilteredStats: (baseData) => {
-                const stats = { pendenteNota: 0, pendenteConcil: 0, canceladas: 0, historico: 0 };
-                stats.pendenteNota = app.getDataForStatusCard(baseData, 'pendente_nota').length;
-                stats.pendenteConcil = app.getDataForStatusCard(baseData, 'pendente_concil').length;
-                stats.canceladas = app.getDataForStatusCard(baseData, 'cancelada').length;
-                stats.historico = app.getDataForStatusCard(baseData, 'concluida').length;
-                return stats;
-            },
-
-            filterByKPI: (key) => {
+            filterByKPI(key) {
                 state.filter.kpiFilter = key;
                 state.filter.status = 'all';
                 state.filter.mode = 'normal';
-                document.getElementById('filter-status').value = 'all';
-                ui.renderTable();
+                state.table.page = 1;
+                dom.filterStatus.value = 'all';
+                state.cache.chartKey = null;
+                state.cache.tableKey = null;
+                render.schedule({ charts: true, table: true });
             },
 
-            toggleStuckMode: () => {
-                if(state.filter.mode === 'stuck') {
+            toggleStuckMode() {
+                if (state.filter.mode === 'stuck') {
                     state.filter.mode = 'normal';
                     ui.showToast('Modo normal restaurado');
                 } else {
                     state.filter.mode = 'stuck';
                     state.filter.kpiFilter = null;
                     state.filter.status = 'all';
-                    document.getElementById('filter-status').value = 'all';
+                    dom.filterStatus.value = 'all';
                     ui.showToast('Exibindo travados > 3 dias', 'error');
                 }
-                ui.renderTable();
+                state.table.page = 1;
+                state.cache.chartKey = null;
+                state.cache.tableKey = null;
+                render.schedule({ charts: true, table: true });
             },
 
-            deleteItem: async () => {
+            async deleteItem() {
                 const id = document.getElementById('btn-delete').getAttribute('data-id');
-                const pwd = prompt("Senha Administrativa:");
-                if (pwd === "63258116") {
+                const pwd = prompt('Senha Administrativa:');
+                if (pwd === '63258116') {
                     try {
                         await window.MalutDB.excluirCompra(id);
                         ui.showToast('Excluído!', 'error');
                         ui.closeModal();
-                    } catch(err) {
+                    } catch (err) {
                         ui.showToast('Erro ao excluir: ' + err.message, 'error');
                     }
-                } else if(pwd) {
+                } else if (pwd) {
                     ui.showToast('Senha incorreta.', 'error');
                 }
             }
         };
 
         app.init();
+    </script>
     </script>
 </body>
 </html>
